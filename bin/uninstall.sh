@@ -14,7 +14,7 @@ PURGE_HOSTNAME=false
 [ "${1:-}" = "--purge-hostname" ] && PURGE_HOSTNAME=true
 
 echo "Stopping and removing services..."
-for svc in garden-api.service mqtt.service; do
+for svc in garden-api.service mqtt.service garden-boot-indicator.service; do
     sudo systemctl disable --now "$svc" 2>/dev/null
     sudo rm -f "/etc/systemd/system/$svc"
 done
