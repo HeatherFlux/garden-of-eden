@@ -30,6 +30,10 @@ A broad overhaul closing out the open milestones:
   no separate app required. See [`docs/access.md`](docs/access.md).
 - **Headless-friendly** — `setup.sh` keeps **SSH on** and sets up mDNS so the unit
   is reachable at `gardyn.local` right after flashing.
+
+> Installing on a Pi? Follow [`docs/INSTALL.md`](docs/INSTALL.md) — a step-by-step,
+> brick-safe handoff (dry-run, backups, uninstall). Note the code is on the
+> **`v2-overhaul`** branch.
 - **Self-sufficient REST API** — camera, scheduling, grow-cycle, and system/model
   endpoints (see below), with optional API-key auth.
 - **Home Assistant** — the physical button is now an HA `event` entity
