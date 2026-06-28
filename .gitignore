@@ -11,3 +11,7 @@ simulator/.sim/
 # If using Jython
 *.class
 .env
+
+# Browser-validation artifacts
+.playwright-mcp/
+garden-*.png
