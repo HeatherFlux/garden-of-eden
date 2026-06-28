@@ -4,6 +4,22 @@ Pi's crontab (issue #32).
 The schedule is persisted as JSON and compiled into crontab lines tagged with a
 marker comment so we can rewrite only our own entries. Cron invokes the
 ``light`` and ``water`` CLI symlinks installed by bin/setup.sh.
+
+Each of ``lights`` and ``pump`` holds a ``days`` map keyed by weekday
+(``mon``..``sun``); every weekday carries a list of entries, so you can set as
+many light windows and pump runs per day as you like:
+
+    {
+      "lights": {"enabled": true, "days": {
+        "mon": [{"onTime": "06:00", "offTime": "22:00", "brightness": 70}], ...
+      }},
+      "pump": {"enabled": true, "days": {
+        "mon": [{"time": "08:00", "duration": 5}, {"time": "16:00", "duration": 5}], ...
+      }}
+    }
+
+Older single-window schedules (``lights.onTime`` / ``pump.runs``) are migrated
+to this shape on load, so existing saved schedules and clients keep working.
 """
 
 import json
@@ -18,19 +34,70 @@ CRON_MARKER = "# garden-of-eden"
 LIGHT_CMD = "/usr/local/bin/light"
 WATER_CMD = "/usr/local/bin/water"
 
+# Weekday order and the cron day-of-week number each maps to (cron: Sun=0).
+DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+DAY_TO_CRON = {"mon": 1, "tue": 2, "wed": 3, "thu": 4, "fri": 5, "sat": 6, "sun": 0}
+
 DEFAULT_SCHEDULE = {
-    "lights": {"enabled": False, "onTime": "08:00", "offTime": "22:00", "brightness": 70},
-    "pump": {"enabled": False, "runs": []},
+    "lights": {"enabled": False, "days": {d: [] for d in DAYS}},
+    "pump": {"enabled": False, "days": {d: [] for d in DAYS}},
 }
 
 
+def _empty_days():
+    return {d: [] for d in DAYS}
+
+
+def normalize_schedule(schedule):
+    """Coerce any accepted schedule shape into the canonical per-day form.
+
+    Accepts the current ``days`` layout, the legacy single-window layout
+    (``lights.onTime``/``offTime``/``brightness`` and ``pump.runs``), or a mix,
+    and always returns a dict with full ``mon``..``sun`` day maps.
+    """
+    schedule = schedule or {}
+    lights = dict(schedule.get("lights") or {})
+    pump = dict(schedule.get("pump") or {})
+
+    # --- lights ---
+    light_days = _empty_days()
+    if isinstance(lights.get("days"), dict):
+        for day, entries in lights["days"].items():
+            if day in light_days and isinstance(entries, list):
+                light_days[day] = [dict(e) for e in entries]
+    elif lights.get("onTime") or lights.get("offTime"):
+        # Legacy: one window applied to every day.
+        window = {
+            "onTime": lights.get("onTime", "08:00"),
+            "offTime": lights.get("offTime", "22:00"),
+            "brightness": int(lights.get("brightness", 70)),
+        }
+        light_days = {d: [dict(window)] for d in DAYS}
+
+    # --- pump ---
+    pump_days = _empty_days()
+    if isinstance(pump.get("days"), dict):
+        for day, entries in pump["days"].items():
+            if day in pump_days and isinstance(entries, list):
+                pump_days[day] = [dict(e) for e in entries]
+    elif isinstance(pump.get("runs"), list):
+        # Legacy: same set of runs applied to every day.
+        runs = [dict(r) for r in pump["runs"]]
+        pump_days = {d: [dict(r) for r in runs] for d in DAYS}
+
+    return {
+        "lights": {"enabled": bool(lights.get("enabled")), "days": light_days},
+        "pump": {"enabled": bool(pump.get("enabled")), "days": pump_days},
+    }
+
+
 def load_schedule():
-    """Return the saved schedule, or defaults if none exists."""
+    """Return the saved schedule (normalized), or defaults if none exists."""
     try:
         with open(config.SCHEDULE_FILE) as fh:
-            return json.load(fh)
+            return normalize_schedule(json.load(fh))
     except (FileNotFoundError, ValueError):
-        return dict(DEFAULT_SCHEDULE)
+        return normalize_schedule(DEFAULT_SCHEDULE)
 
 
 def save_schedule(schedule):
@@ -47,25 +114,41 @@ def _hh_mm(value):
     return m, h
 
 
-def build_cron_lines(schedule):
-    """Compile a schedule dict into a list of (marked) crontab lines."""
-    lines = []
-    lights = schedule.get("lights", {})
-    if lights.get("enabled"):
-        brightness = int(lights.get("brightness", 70))
-        on_m, on_h = _hh_mm(lights.get("onTime", "08:00"))
-        off_m, off_h = _hh_mm(lights.get("offTime", "22:00"))
-        lines.append(
-            f"{on_m} {on_h} * * * {LIGHT_CMD} --on --brightness {brightness} {CRON_MARKER}"
-        )
-        lines.append(f"{off_m} {off_h} * * * {LIGHT_CMD} --off {CRON_MARKER}")
+def _pump_seconds(duration_minutes):
+    """Minutes -> seconds, clamped to the hard safety cap (never > 5 min)."""
+    seconds = int(duration_minutes) * 60
+    if seconds < 1:
+        raise ValueError(f"invalid pump duration {duration_minutes!r}")
+    return min(seconds, config.MAX_PUMP_RUN_SECONDS)
 
-    pump = schedule.get("pump", {})
-    if pump.get("enabled"):
-        for run in pump.get("runs", []):
-            run_m, run_h = _hh_mm(run.get("time", "12:00"))
-            duration = int(run.get("duration", 5)) * 60  # minutes -> seconds
-            lines.append(f"{run_m} {run_h} * * * {WATER_CMD} {duration} {CRON_MARKER}")
+
+def build_cron_lines(schedule):
+    """Compile a (normalized) schedule dict into a list of marked crontab lines."""
+    schedule = normalize_schedule(schedule)
+    lines = []
+
+    lights = schedule["lights"]
+    if lights["enabled"]:
+        for day in DAYS:
+            dow = DAY_TO_CRON[day]
+            for window in lights["days"][day]:
+                brightness = int(window.get("brightness", 70))
+                on_m, on_h = _hh_mm(window.get("onTime", "08:00"))
+                off_m, off_h = _hh_mm(window.get("offTime", "22:00"))
+                lines.append(
+                    f"{on_m} {on_h} * * {dow} {LIGHT_CMD} --on "
+                    f"--brightness {brightness} {CRON_MARKER}"
+                )
+                lines.append(f"{off_m} {off_h} * * {dow} {LIGHT_CMD} --off {CRON_MARKER}")
+
+    pump = schedule["pump"]
+    if pump["enabled"]:
+        for day in DAYS:
+            dow = DAY_TO_CRON[day]
+            for run in pump["days"][day]:
+                run_m, run_h = _hh_mm(run.get("time", "12:00"))
+                seconds = _pump_seconds(run.get("duration", 5))
+                lines.append(f"{run_m} {run_h} * * {dow} {WATER_CMD} {seconds} {CRON_MARKER}")
 
     return lines
 
@@ -85,6 +168,7 @@ def _write_crontab(lines):
 def apply_schedule(schedule):
     """Persist the schedule and replace our crontab entries with its compiled form."""
     # Validate/compile first so a bad schedule never touches crontab.
+    schedule = normalize_schedule(schedule)
     cron_lines = build_cron_lines(schedule)
     save_schedule(schedule)
 
