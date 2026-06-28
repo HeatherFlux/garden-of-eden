@@ -37,6 +37,12 @@ class SystemRouteTestCase(unittest.TestCase):
         self.assertEqual(body["model"], "gardyn 3.0")
         self.assertEqual(body["profile"], config.MODELS["gardyn 3.0"])
 
+    @patch("app.sensors.system.routes.detect_model", return_value="gardyn 3.0 (simulated)")
+    def test_profile_resolves_for_suffixed_model(self, _model):
+        # Custom/suffixed model strings still resolve to the closest profile.
+        body = self.client.get("/system").get_json()
+        self.assertEqual(body["profile"], config.MODELS["gardyn 3.0"])
+
 
 if __name__ == "__main__":
     unittest.main()
