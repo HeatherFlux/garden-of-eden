@@ -96,6 +96,11 @@ OVER_TEMP_ALERT_PIN = _get_int("OVER_TEMP_ALERT_PIN", 25)
 DEFAULT_BRIGHTNESS = _get_int("DEFAULT_BRIGHTNESS", 50)
 DEFAULT_PUMP_SPEED = _get_int("DEFAULT_PUMP_SPEED", 100)
 
+# Hard safety cap: the pump may never run longer than this in one go, no matter
+# what a schedule, API call, or CLI invocation requests. Enforced in the pump
+# routes, the schedule cron compiler, and bin/water.sh. 300s = 5 minutes.
+MAX_PUMP_RUN_SECONDS = _get_int("MAX_PUMP_RUN_SECONDS", 300)
+
 # ---------------------------------------------------------------------------
 # I2C device addresses
 # ---------------------------------------------------------------------------
