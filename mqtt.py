@@ -1,64 +1,74 @@
+import json
+import logging
+import signal
 import subprocess
+import sys
 import threading
 from threading import Timer
-import logging
-import paho.mqtt.client as mqtt
-import base64
-import json
+
 # import picamera
 # import cv2
 from time import sleep
-from config import USERNAME, PASSWORD, BROKER, PORT, KEEP_ALIVE_INTERVAL, BASE_TOPIC, IDENTIFIER, MODEL, VERSION, WATER_LOW_CM, UPPER_CAMERA_DEVICE, LOWER_CAMERA_DEVICE, UPPER_IMAGE_PATH, LOWER_IMAGE_PATH, CAMERA_RESOLUTION, IMAGE_INTERVAL_SECONDS
 
+import paho.mqtt.client as mqtt
 from gpiozero import Button  # Import gpiozero Button
-from gpiozero.pins.pigpio import PiGPIOFactory
 
-from app.sensors.light.light import Light
-from app.sensors.pump.pump import Pump
-from app.sensors.pcb_temp.pcb_temp import get_pcb_temperature
-from app.sensors.temperature.temperature import temperature_sensor
-from app.sensors.humidity.humidity import humidity_sensor
+from app.lib import grow as grow_lib
+from app.lib import state as state_lib
+from app.lib.hardware import detect_model, get_pin_factory
+from app.lib.logging_config import configure_logging
+from app.lib.water import is_water_low
 from app.sensors.distance.distance import Distance, MeasurementError
-
-# Configure logging
-logging.basicConfig(
-    level=logging.WARNING,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler("gardyn.log"),  # Log to a file
-        logging.StreamHandler()  # Log to the console (stdout)
-    ]
+from app.sensors.humidity.humidity import humidity_sensor
+from app.sensors.light.light import Light
+from app.sensors.pcb_temp.pcb_temp import get_pcb_temperature
+from app.sensors.pump.pump import Pump
+from app.sensors.temperature.temperature import temperature_sensor
+from config import (
+    BASE_TOPIC,
+    BROKER,
+    BUTTON_PIN,
+    CAMERA_RESOLUTION,
+    IDENTIFIER,
+    IMAGE_INTERVAL_SECONDS,
+    KEEP_ALIVE_INTERVAL,
+    LOWER_CAMERA_DEVICE,
+    LOWER_IMAGE_PATH,
+    MODEL,
+    PASSWORD,
+    PORT,
+    UPPER_CAMERA_DEVICE,
+    UPPER_IMAGE_PATH,
+    USERNAME,
+    VERSION,
+    WATER_LOW_CM,
 )
 
+# Configure logging (shared config; level via LOG_LEVEL env).
+configure_logging()
 logger = logging.getLogger(__name__)
 
-# set to INFO, for to capture mqtt messages at info-level messages.
-logger.setLevel(logging.WARNING)
-
-logger.debug("This is a debug message")
-logger.info("This is an info message")
-logger.warning("This is a warning message")
-logger.error("This is an error message")
-
-# Initialize devices
-pin_factory = PiGPIOFactory()
+# Initialize devices on the shared pigpio pin factory (issue #67).
+pin_factory = get_pin_factory()
 
 pump = Pump(pin_factory=pin_factory)
 light = Light(pin_factory=pin_factory)
 distance_sensor = Distance(pin_factory=pin_factory)
 
 # default on brightness
-brightness  = 50
-speed       = 100
+brightness = 50
+speed = 100
 sec_per_min = 60
-min_per_hr  = 60
+min_per_hr = 60
 
 # publish twice an hour
 publish_frequency = sec_per_min * min_per_hr / 2
 
 # Button GPIO setup using gpiozero
-button_pin = 13
-button = Button(button_pin, pin_factory=pin_factory, bounce_time=0.2, hold_time=2)  # hold_time = 2 seconds for long press detection
+button_pin = BUTTON_PIN
+button = Button(
+    button_pin, pin_factory=pin_factory, bounce_time=0.2, hold_time=2
+)  # hold_time = 2 seconds for long press detection
 
 # Variables to track the state of the light and pump
 light_state = False
@@ -66,6 +76,7 @@ pump_state = False
 double_press_time = 1  # Time to detect a double press (in seconds)
 press_count = 0
 double_press_timer = None
+
 
 # Button press callbacks
 def toggle_light():
@@ -79,6 +90,8 @@ def toggle_light():
         logger.info("Toggling Light OFF")
         light.off()
         client.publish(BASE_TOPIC + "/light/state", "OFF")
+    state_lib.save_state(light_on=light_state, brightness=brightness)
+
 
 def toggle_pump():
     global pump_state
@@ -91,6 +104,8 @@ def toggle_pump():
         logger.info("Toggling Pump OFF")
         pump.off()
         client.publish(BASE_TOPIC + "/pump/state", "OFF")
+    state_lib.save_state(pump_on=pump_state, speed=speed)
+
 
 def handle_button_press():
     global press_count, double_press_timer
@@ -108,16 +123,39 @@ def handle_button_press():
         handle_double_press()
         press_count = 0
 
+
+def publish_button_event(event):
+    """Publish a physical-button event so Home Assistant can trigger automations
+    on the gardyn button (issue #78). Values: "single", "double", "long"."""
+    try:
+        # HA's MQTT event platform expects a JSON payload with "event_type".
+        client.publish(BASE_TOPIC + "/button/event", json.dumps({"event_type": event}))
+        logger.info("Published button event: %s", event)
+    except Exception as exc:
+        logger.error("Failed to publish button event: %s", exc)
+
+
 def handle_single_press():
     global press_count
+    publish_button_event("single")
     toggle_light()  # Single press toggles the light
     press_count = 0
 
+
 def handle_double_press():
+    publish_button_event("double")
     toggle_pump()  # Double press toggles the pump
 
-# Set button event for press detection
+
+def handle_long_press():
+    # Long press is exposed to HA as an event; no local actuator change.
+    publish_button_event("long")
+
+
+# Set button events for press detection
 button.when_pressed = handle_button_press
+button.when_held = handle_long_press
+
 
 # helpers
 def flash_lights(times=3, delay=0.3):
@@ -137,6 +175,7 @@ def flash_lights(times=3, delay=0.3):
     else:
         light.off()
 
+
 def safe_distance_measure():
     global distance_sensor
     try:
@@ -150,6 +189,7 @@ def safe_distance_measure():
             logger.error(f"Distance full recovery failed: {e2}")
             return None
 
+
 def publish_water_low_mode(client):
     if WATER_LOW_CM not in (None, 0):
         mode = "Enabled"
@@ -160,21 +200,27 @@ def publish_water_low_mode(client):
 
 
 def update_water_low_state(client):
-    if WATER_LOW_CM not in (None, 0):
-        distance = safe_distance_measure()
-        if distance is not None:
-            if distance > WATER_LOW_CM:
-                client.publish(BASE_TOPIC + "/water/low/state", "ON", retain=True)
-                logger.info(f"Updated water low state to ON (distance {distance:.2f}cm > {WATER_LOW_CM:.2f}cm)")
-            else:
-                client.publish(BASE_TOPIC + "/water/low/state", "OFF", retain=True)
-                logger.info(f"Updated water low state to OFF (distance {distance:.2f}cm <= {WATER_LOW_CM:.2f}cm)")
-        else:
-            logger.warning("Could not update water low state because distance reading failed")
-    else:
-        # If checking is disabled, maybe set it to OFF by default
+    if WATER_LOW_CM in (None, 0):
+        # Checking disabled: report not-low.
         client.publish(BASE_TOPIC + "/water/low/state", "OFF", retain=True)
         logger.info("Water low checking disabled, setting water low state to OFF")
+        return
+
+    distance = safe_distance_measure()
+    if distance is None:
+        logger.warning("Could not update water low state because distance reading failed")
+        return
+
+    low = is_water_low(distance, WATER_LOW_CM)
+    state = "ON" if low else "OFF"
+    client.publish(BASE_TOPIC + "/water/low/state", state, retain=True)
+    logger.info(
+        "Updated water low state to %s (distance %.2fcm, threshold %.2fcm)",
+        state,
+        distance,
+        WATER_LOW_CM,
+    )
+
 
 # https://www.home-assistant.io/integrations/mqtt/#discovery-messages
 #  Note: homeassistant/<component>/[<node_id>/]<object_id>/config.
@@ -184,12 +230,12 @@ def send_discovery_messages(client):
         "identifiers": [IDENTIFIER],
         "name": BASE_TOPIC,
         "manufacturer": "gardyn-of-eden",
-        "model": MODEL,
+        "model": detect_model() or MODEL,
         "sw_version": VERSION,
     }
 
     # Config for Light
-    TEMP_CONFIG_TOPIC = "homeassistant/light/gardyn/"+IDENTIFIER+"_light/config"
+    TEMP_CONFIG_TOPIC = "homeassistant/light/gardyn/" + IDENTIFIER + "_light/config"
     temp_config_payload = {
         "name": "Light",
         "unique_id": IDENTIFIER + "_light",
@@ -199,49 +245,47 @@ def send_discovery_messages(client):
         "brightness_state_topic": BASE_TOPIC + "/light/brightness/state",
         "brightness_command_topic": BASE_TOPIC + "/light/brightness/set",
         "brightness_scale": 100,
-        "device": device_info
+        "device": device_info,
     }
     client.publish(TEMP_CONFIG_TOPIC, json.dumps(temp_config_payload), retain=True)
 
-    #Config for Pump (as a light with speed control, for example)
+    # Config for Pump (as a light with speed control, for example)
     # todo: maybe use fan instead....
-    TEMP_CONFIG_TOPIC = "homeassistant/light/gardyn/"+IDENTIFIER+"_pump/config"
+    TEMP_CONFIG_TOPIC = "homeassistant/light/gardyn/" + IDENTIFIER + "_pump/config"
     temp_config_payload = {
         "name": "Pump",
         "unique_id": IDENTIFIER + "_pump",
         "platform": "mqtt",
-	"device_class": "fan",
+        "device_class": "fan",
         "state_topic": BASE_TOPIC + "/pump/state",
         "command_topic": BASE_TOPIC + "/pump/command",
-
         "brightness_state_topic": BASE_TOPIC + "/pump/speed/state",
         "brightness_command_topic": BASE_TOPIC + "/pump/speed/set",
         "brightness_scale": 100,
-
         # if using fan....
-	# "percentage_state_topic": BASE_TOPIC + "/pump/speed/state",
-	# "percentage_command_topic": BASE_TOPIC + "/pump/speed/set",
-	# "speed_range_min": 1,
-	# "speed_range_max": 100,
+        # "percentage_state_topic": BASE_TOPIC + "/pump/speed/state",
+        # "percentage_command_topic": BASE_TOPIC + "/pump/speed/set",
+        # "speed_range_min": 1,
+        # "speed_range_max": 100,
         "icon": "mdi:water-pump",
-        "device": device_info
+        "device": device_info,
     }
     client.publish(TEMP_CONFIG_TOPIC, json.dumps(temp_config_payload), retain=True)
 
-    #Config for Temperature from PCB
-    TEMP_CONFIG_TOPIC = "homeassistant/sensor/gardyn/"+IDENTIFIER+"_pcb_temp/config"
+    # Config for Temperature from PCB
+    TEMP_CONFIG_TOPIC = "homeassistant/sensor/gardyn/" + IDENTIFIER + "_pcb_temp/config"
     temp_config_payload = {
         "name": "PCB Temperature",
         "unique_id": IDENTIFIER + "_pcb_temp",
         "state_topic": BASE_TOPIC + "/pcb/temperature",
         "unit_of_measurement": "°C",
         "device_class": "temperature",
-        "device": device_info
+        "device": device_info,
     }
     client.publish(TEMP_CONFIG_TOPIC, json.dumps(temp_config_payload), retain=True)
 
-    #Config for Temperature Sensor
-    TEMP_CONFIG_TOPIC = "homeassistant/sensor/gardyn/"+IDENTIFIER+"_temperature/config"
+    # Config for Temperature Sensor
+    TEMP_CONFIG_TOPIC = "homeassistant/sensor/gardyn/" + IDENTIFIER + "_temperature/config"
     temp_config_payload = {
         "name": "Temperature",
         "unique_id": IDENTIFIER + "_temperature",
@@ -249,12 +293,12 @@ def send_discovery_messages(client):
         "command_topic": BASE_TOPIC + "/temperature/get",
         "unit_of_measurement": "°C",
         "device_class": "temperature",
-        "device": device_info
+        "device": device_info,
     }
     client.publish(TEMP_CONFIG_TOPIC, json.dumps(temp_config_payload), retain=True)
 
-    #Config for Humidity Sensor
-    TEMP_CONFIG_TOPIC = "homeassistant/sensor/gardyn/"+IDENTIFIER+"_humidity/config"
+    # Config for Humidity Sensor
+    TEMP_CONFIG_TOPIC = "homeassistant/sensor/gardyn/" + IDENTIFIER + "_humidity/config"
     temp_config_payload = {
         "name": "Humidity",
         "unique_id": IDENTIFIER + "_humidity",
@@ -262,13 +306,12 @@ def send_discovery_messages(client):
         "command_topic": BASE_TOPIC + "/humidity/get",
         "unit_of_measurement": "%",
         "device_class": "humidity",
-        "device": device_info
+        "device": device_info,
     }
     client.publish(TEMP_CONFIG_TOPIC, json.dumps(temp_config_payload), retain=True)
 
-
-    #Config for Water Level Sensor
-    TEMP_CONFIG_TOPIC = "homeassistant/sensor/gardyn/"+IDENTIFIER+"_water_level/config"
+    # Config for Water Level Sensor
+    TEMP_CONFIG_TOPIC = "homeassistant/sensor/gardyn/" + IDENTIFIER + "_water_level/config"
 
     temp_config_payload = {
         "name": "Water Level",
@@ -277,7 +320,7 @@ def send_discovery_messages(client):
         "command_topic": BASE_TOPIC + "/water/level/get",
         "unit_of_measurement": "cm",
         "device_class": "distance",
-        "device": device_info
+        "device": device_info,
     }
     client.publish(TEMP_CONFIG_TOPIC, json.dumps(temp_config_payload), retain=True)
 
@@ -291,12 +334,12 @@ def send_discovery_messages(client):
         "device_class": "problem",
         "payload_on": "ON",
         "payload_off": "OFF",
-        "device": device_info
+        "device": device_info,
     }
     client.publish(TEMP_CONFIG_TOPIC, json.dumps(temp_config_payload), retain=True)
 
     # Config for Water Low Threshold (current value)
-        # Config for Water Low CM Set Number
+    # Config for Water Low CM Set Number
     TEMP_CONFIG_TOPIC = f"homeassistant/number/gardyn/{IDENTIFIER}_water_low_cm/config"
     temp_config_payload = {
         "name": "Set Water Low Threshold",
@@ -309,7 +352,7 @@ def send_discovery_messages(client):
         "step": 0.5,
         "unit_of_measurement": "cm",
         "device_class": "distance",
-        "device": device_info
+        "device": device_info,
     }
     client.publish(TEMP_CONFIG_TOPIC, json.dumps(temp_config_payload), retain=True)
 
@@ -321,7 +364,7 @@ def send_discovery_messages(client):
         "platform": "mqtt",
         "state_topic": BASE_TOPIC + "/water/low/mode",
         "icon": "mdi:toggle-switch",  # Optional: or use mdi:alert for dramatic effect
-        "device": device_info
+        "device": device_info,
     }
     client.publish(TEMP_CONFIG_TOPIC, json.dumps(temp_config_payload), retain=True)
 
@@ -334,7 +377,7 @@ def send_discovery_messages(client):
         "encoding": "b64",
         "content_type": "image/jpeg",
         "object_id": IDENTIFIER + "_upper_camera",
-        "device": device_info
+        "device": device_info,
     }
     client.publish(TEMP_CONFIG_TOPIC, json.dumps(temp_config_payload), retain=True)
 
@@ -347,9 +390,23 @@ def send_discovery_messages(client):
         "encoding": "b64",
         "content_type": "image/jpeg",
         "object_id": IDENTIFIER + "_lower_camera",
-        "device": device_info
+        "device": device_info,
     }
     client.publish(TEMP_CONFIG_TOPIC, json.dumps(temp_config_payload), retain=True)
+
+    # Config for the physical button as a Home Assistant event entity (#78).
+    # Fires "single"/"double"/"long" so HA automations can react to presses.
+    TEMP_CONFIG_TOPIC = f"homeassistant/event/gardyn/{IDENTIFIER}_button/config"
+    temp_config_payload = {
+        "name": "Button",
+        "unique_id": IDENTIFIER + "_button",
+        "state_topic": BASE_TOPIC + "/button/event",
+        "event_types": ["single", "double", "long"],
+        "device_class": "button",
+        "device": device_info,
+    }
+    client.publish(TEMP_CONFIG_TOPIC, json.dumps(temp_config_payload), retain=True)
+
 
 def on_connect(client, userdata, flags, rc, properties=None):
     logger.info(f"Connected with result code {rc}")
@@ -357,6 +414,7 @@ def on_connect(client, userdata, flags, rc, properties=None):
     # client.subscribe(BASE_TOPIC + "/light/brightness/set")
     send_discovery_messages(client)
     publish_water_low_mode(client)
+
 
 def on_message(client, userdata, msg):
     global brightness, speed, WATER_LOW_CM
@@ -382,7 +440,9 @@ def on_message(client, userdata, msg):
                 if WATER_LOW_CM not in (None, 0):
                     distance = safe_distance_measure()
                     if distance is not None and distance > WATER_LOW_CM:
-                        logger.warning(f"Water too low ({distance:.2f}cm > {WATER_LOW_CM:.2f}cm), aborting pump")
+                        logger.warning(
+                            f"Water too low ({distance:.2f}cm > {WATER_LOW_CM:.2f}cm), aborting pump"
+                        )
                         flash_lights()
                         client.publish(BASE_TOPIC + "/water/low/state", "ON", retain=True)
                         return
@@ -444,6 +504,7 @@ def on_message(client, userdata, msg):
     except Exception as e:
         logger.exception(f"Error handling message on topic {msg.topic}: {e}")
 
+
 def publish_pcb_temperature(client):
     while True:
         try:
@@ -452,7 +513,8 @@ def publish_pcb_temperature(client):
             client.publish(BASE_TOPIC + "/pcb/temperature", f"{pcb_temp:.2f}")
         except Exception as e:
             logger.error(f"Failed to read or publish PCB temperature: {e}")
-        sleep(30*60)  # Publish frequency, every x seconds
+        sleep(30 * 60)  # Publish frequency, every x seconds
+
 
 def publish_temperature(client):
     while True:
@@ -462,7 +524,8 @@ def publish_temperature(client):
             client.publish(BASE_TOPIC + "/temperature", f"{temperature:.2f}")
         except Exception as e:
             logger.error(f"Failed to read or publish ambient temperature: {e}")
-        sleep(30*60)  # Publish frequency, every x seconds
+        sleep(30 * 60)  # Publish frequency, every x seconds
+
 
 def publish_humidity(client):
     while True:
@@ -472,7 +535,8 @@ def publish_humidity(client):
             client.publish(BASE_TOPIC + "/humidity", f"{humidity:.2f}")
         except Exception as e:
             logger.error(f"Failed to read or publish ambient humidity: {e}")
-        sleep(30*60)  # Publish frequency, every x seconds
+        sleep(30 * 60)  # Publish frequency, every x seconds
+
 
 def publish_water_level(client):
     while True:
@@ -482,44 +546,126 @@ def publish_water_level(client):
             client.publish(BASE_TOPIC + "/water/level", f"{distance:.2f}")
         sleep(30 * 60)
 
+
 def publish_images(client):
     while True:
         try:
             # Capture upper camera image
-            subprocess.check_call([
-                'fswebcam', '-d', UPPER_CAMERA_DEVICE, '-r', CAMERA_RESOLUTION,
-                '-S', '2', '-F', '2', '--no-banner', UPPER_IMAGE_PATH
-            ])
+            subprocess.check_call(
+                [
+                    "fswebcam",
+                    "-d",
+                    UPPER_CAMERA_DEVICE,
+                    "-r",
+                    CAMERA_RESOLUTION,
+                    "-S",
+                    "2",
+                    "-F",
+                    "2",
+                    "--no-banner",
+                    UPPER_IMAGE_PATH,
+                ]
+            )
             logger.info(f"Captured image from upper camera ({UPPER_CAMERA_DEVICE})")
 
             # Capture lower camera image
-            subprocess.check_call([
-                'fswebcam', '-d', LOWER_CAMERA_DEVICE, '-r', CAMERA_RESOLUTION,
-                '-S', '2', '-F', '2', '--no-banner', LOWER_IMAGE_PATH
-            ])
+            subprocess.check_call(
+                [
+                    "fswebcam",
+                    "-d",
+                    LOWER_CAMERA_DEVICE,
+                    "-r",
+                    CAMERA_RESOLUTION,
+                    "-S",
+                    "2",
+                    "-F",
+                    "2",
+                    "--no-banner",
+                    LOWER_IMAGE_PATH,
+                ]
+            )
             logger.info(f"Captured image from lower camera ({LOWER_CAMERA_DEVICE})")
 
             # Publish upper camera image
-            with open(UPPER_IMAGE_PATH, 'rb') as f:
+            with open(UPPER_IMAGE_PATH, "rb") as f:
                 upper_cam_jpeg_data = f.read()  # Read as raw binary
-                client.publish(BASE_TOPIC + "/image/upper_camera", payload=upper_cam_jpeg_data, qos=0, retain=False)
+                client.publish(
+                    BASE_TOPIC + "/image/upper_camera",
+                    payload=upper_cam_jpeg_data,
+                    qos=0,
+                    retain=False,
+                )
                 logger.info("Published image to /image/upper_camera")
 
             # Publish lower camera image
-            with open(LOWER_IMAGE_PATH, 'rb') as f:
+            with open(LOWER_IMAGE_PATH, "rb") as f:
                 lower_cam_jpeg_data = f.read()  # Read as raw binary
-                client.publish(BASE_TOPIC + "/image/lower_camera", payload=lower_cam_jpeg_data, qos=0, retain=False)
+                client.publish(
+                    BASE_TOPIC + "/image/lower_camera",
+                    payload=lower_cam_jpeg_data,
+                    qos=0,
+                    retain=False,
+                )
                 logger.info("Published image to /image/lower_camera")
 
         except subprocess.CalledProcessError as e:
             logger.error(f"Camera capture failed: {e}")
-        except Exception as e:
+        except Exception:
             logger.exception("Unexpected error during image capture/publish")
 
         sleep(IMAGE_INTERVAL_SECONDS)
 
 
+def restore_actuator_state(client):
+    """Restore light/pump to their last persisted state after a restart (#3)."""
+    global light_state, pump_state, brightness, speed
+    saved = state_lib.load_state()
+    brightness = saved.get("brightness", brightness)
+    speed = saved.get("speed", speed)
+    try:
+        if saved.get("light_on"):
+            light_state = True
+            light.set_duty_cycle(brightness)
+            client.publish(BASE_TOPIC + "/light/state", "ON")
+        if saved.get("pump_on"):
+            pump_state = True
+            pump.set_speed(speed)
+            client.publish(BASE_TOPIC + "/pump/state", "ON")
+        logger.info("Restored actuator state: %s", saved)
+    except Exception as exc:
+        logger.error("Failed to restore actuator state: %s", exc)
+
+
+def publish_grow_reminders(client):
+    """Publish grow stage and any due reminders (thinning/root/harvest/nutrient)."""
+    while True:
+        try:
+            grow_state = grow_lib.load_state()
+            client.publish(BASE_TOPIC + "/grow/stage", grow_state.get("stage", ""), retain=True)
+            for reminder in grow_lib.due_reminders(grow_state):
+                client.publish(BASE_TOPIC + "/grow/reminder", reminder)
+                logger.info("Published grow reminder: %s", reminder)
+        except Exception:
+            logger.exception("Error publishing grow reminders")
+        sleep(int(publish_frequency))
+
+
+def graceful_shutdown(signum, frame):
+    """Turn the pump off and release pigpio cleanly on SIGTERM/SIGINT (#3)."""
+    logger.info("Received signal %s; shutting down gracefully", signum)
+    try:
+        pump.off()
+        pump.close()
+        light.close()
+    except Exception as exc:
+        logger.error("Error during graceful shutdown: %s", exc)
+    sys.exit(0)
+
+
 if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, graceful_shutdown)
+    signal.signal(signal.SIGINT, graceful_shutdown)
+
     logger.info(f"Connecting to {BROKER} on port {PORT} with keep alive {KEEP_ALIVE_INTERVAL}")
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
     client.on_connect = on_connect
@@ -543,9 +689,18 @@ if __name__ == "__main__":
     water_level_thread.daemon = True
     water_level_thread.start()
 
-
     publish_images_thread = threading.Thread(target=publish_images, args=(client,))
     publish_images_thread.daemon = True
     publish_images_thread.start()
+
+    grow_thread = threading.Thread(target=publish_grow_reminders, args=(client,))
+    grow_thread.daemon = True
+    grow_thread.start()
+
+    # Restore last known actuator state after (re)connect.
+    client.on_connect = lambda c, u, f, rc, properties=None: (
+        on_connect(c, u, f, rc, properties),
+        restore_actuator_state(c),
+    )
 
     client.loop_forever()

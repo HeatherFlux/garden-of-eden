@@ -57,7 +57,7 @@ function install_packages {
     show_spinner
     wait $!
     log_info "Installing packages"
-    sudo apt install -y i2c-tools fswebcam pigpio python3 python3-pip python3-venv mosquitto mosquitto-clients >> "$LOG_FILE" 2>&1 &
+    sudo apt install -y i2c-tools fswebcam pigpio python3 python3-pip python3-venv mosquitto mosquitto-clients openssh-server avahi-daemon >> "$LOG_FILE" 2>&1 &
     show_spinner
     wait $!
     if [ $? -ne 0 ]; then
@@ -222,6 +222,74 @@ function check_i2c_sensors {
 function create_bash_script_symlinks() {
     sudo ln -fs "${INSTALL_DIR}/bin/light.sh" "/usr/local/bin/light"
     sudo ln -fs "${INSTALL_DIR}/bin/water.sh" "/usr/local/bin/water"
+    sudo ln -fs "${INSTALL_DIR}/bin/update.sh" "/usr/local/bin/garden-update"
+}
+
+# Warn early if we're not on a supported Raspberry Pi OS. pigpio and the GPIO
+# wheels assume a Pi; on other platforms they may need to be built manually.
+function check_os_compatibility {
+    log_info "Checking OS compatibility"
+
+    if [ -f /proc/device-tree/model ] && grep -qi "raspberry pi" /proc/device-tree/model; then
+        log_pass "Detected $(tr -d '\0' < /proc/device-tree/model)"
+    else
+        log_error "Not running on a Raspberry Pi. pigpio/GPIO libraries may need to be built manually and hardware features will not work."
+    fi
+
+    if [ -f /etc/os-release ]; then
+        # shellcheck disable=SC1091
+        . /etc/os-release
+        log_info "OS: ${PRETTY_NAME:-unknown}"
+        case "${ID:-}" in
+            raspbian|debian) log_pass "Supported base OS (${ID})." ;;
+            *) log_error "Untested OS '${ID:-unknown}'. Raspberry Pi OS (Debian) is recommended." ;;
+        esac
+    fi
+
+    local pyver
+    pyver=$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || echo "0.0")
+    log_info "Python ${pyver} detected (3.9+ recommended)."
+}
+
+# Enable SSH so the unit is reachable headlessly after flashing.
+function enable_ssh {
+    log_info "Enabling SSH"
+    if command -v raspi-config >/dev/null 2>&1; then
+        sudo raspi-config nonint do_ssh 0 || true
+    fi
+    sudo systemctl enable --now ssh 2>/dev/null \
+        || sudo systemctl enable --now sshd 2>/dev/null \
+        || log_error "Could not enable the SSH service automatically."
+    log_pass "SSH enabled."
+}
+
+# Set a stable hostname + mDNS so the unit is reachable at <hostname>.local
+# (e.g. gardyn.local) without knowing its IP. Honors GARDEN_HOSTNAME (default gardyn).
+function setup_mdns_hostname {
+    local desired="${GARDEN_HOSTNAME:-gardyn}"
+    local current
+    current=$(hostname)
+    if [ "$current" != "$desired" ]; then
+        log_info "Setting hostname to '$desired' (was '$current')"
+        sudo hostnamectl set-hostname "$desired" 2>/dev/null || true
+        # Keep /etc/hosts in sync so sudo doesn't complain.
+        if ! grep -q "127.0.1.1.*$desired" /etc/hosts; then
+            echo "127.0.1.1 $desired" | sudo tee -a /etc/hosts > /dev/null
+        fi
+    fi
+    sudo systemctl enable --now avahi-daemon 2>/dev/null || true
+    log_pass "Reachable at ${desired}.local (mDNS) once avahi is running."
+}
+
+# Install udev rules so the cameras get stable /dev/gardyn-upper|lower names.
+function install_udev_rules {
+    local rules_src="${INSTALL_DIR}/services/etc/udev/rules.d/99-gardyn-cameras.rules"
+    if [ -f "$rules_src" ]; then
+        sudo cp "$rules_src" /etc/udev/rules.d/
+        sudo udevadm control --reload-rules
+        sudo udevadm trigger
+        log_pass "Installed camera udev rules. Edit KERNELS in $rules_src to match your ports."
+    fi
 }
 
 # Ensure pigpio daemon runs after system reboots
@@ -258,8 +326,50 @@ EOF
     log_info "MQTT service has been started and enabled on boot."
 }
 
+# Setup and start the REST API + web UI service (served by waitress on :5000).
+function setup_api_service {
+    local service_file="$INSTALL_DIR/services/etc/systemd/system/garden-api.service"
+    mkdir -p "$(dirname "$service_file")"
+
+    cat > $service_file <<EOF
+[Unit]
+Description=Garden of Eden REST API + Web UI
+After=network.target pigpiod.service
+Wants=pigpiod.service
+
+[Service]
+User=$USER
+WorkingDirectory=$INSTALL_DIR
+ExecStart=$INSTALL_DIR/venv/bin/waitress-serve --listen=0.0.0.0:5000 run:app
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    sudo cp $service_file /etc/systemd/system/
+    sudo systemctl daemon-reload
+    sudo systemctl enable garden-api.service
+    sudo systemctl start garden-api.service
+    log_info "Web UI/API service started on http://$(hostname).local:5000"
+}
+
+# Verify the REST API responds, if it is running (issue #51 checklist item).
+function verify_api {
+    if command -v curl >/dev/null 2>&1 && curl -s -o /dev/null -w '' "http://localhost:5000/temperature" 2>/dev/null; then
+        log_info "Running API smoke test (bin/api-test.sh)"
+        bash "${INSTALL_DIR}/bin/api-test.sh" >/dev/null 2>&1 \
+            && log_pass "API smoke test passed." \
+            || log_error "API smoke test reported errors. Start it with 'python run.py' and re-run bin/api-test.sh."
+    else
+        log_info "REST API not running; skipping smoke test. Start it with 'python run.py' then run bin/api-test.sh."
+    fi
+}
+
 # Main script execution
 cd $INSTALL_DIR
+
+check_os_compatibility
 
 install_packages
 setup_python_env
@@ -273,8 +383,13 @@ check_i2c_sensors
 add_sensor_type_to_env
 
 create_bash_script_symlinks
+install_udev_rules
+enable_ssh
+setup_mdns_hostname
 
 #Note: pigpiod will be started by mqtt.service
 #enable_pigpiod_service
 
 setup_mqtt_service
+setup_api_service
+verify_api

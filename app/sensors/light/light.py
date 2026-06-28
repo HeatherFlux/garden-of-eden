@@ -1,20 +1,26 @@
 import argparse
+import logging
+
+import pigpio
 from gpiozero import PWMLED
 from gpiozero.pins.pigpio import PiGPIOFactory
-import pigpio
-import logging
+
+import config
+
 
 class GPIOController:
     def __init__(self, pin, pin_factory=None):
         self.pin = pin
         self.factory = pin_factory
-        if pin_factory:
-            self.pi = pigpio.pi()
+        if config.PIGPIO_HOST:
+            self.pi = pigpio.pi(config.PIGPIO_HOST, config.PIGPIO_PORT)
         else:
             self.pi = pigpio.pi()
-        
+
         if not self.pi.connected:
-            raise RuntimeError("Failed to connect to pigpiod daemon. Ensure it's running and accessible.")
+            raise RuntimeError(
+                "Failed to connect to pigpiod daemon. Ensure it's running and accessible."
+            )
 
     def set_frequency(self, frequency):
         if self.pi:
@@ -22,8 +28,9 @@ class GPIOController:
         else:
             raise RuntimeError("pigpio.pi client is not initialized.")
 
+
 class Light:
-    def __init__(self, pin=18, frequency=8000, pin_factory=None):
+    def __init__(self, pin=config.LIGHT_PIN, frequency=config.LIGHT_FREQUENCY, pin_factory=None):
         # pigpiod is running on port 8888
         # Note: for docker: PiGPIOFactory(host='pigpiod', port=8888)
         self.pin = pin
@@ -49,7 +56,7 @@ class Light:
         """
         logging.info("Turning light off")
         self.led.value = 0
-    
+
     def set_brightness(self, brightness_percentage):
         """
         Wrapper function around set_duty_cycle. Provides more intuitive function name.
@@ -71,7 +78,7 @@ class Light:
     def set_frequency(self, frequency):
         logging.info(f"Setting light frequency to {frequency}")
         self.gpio.set_frequency(frequency)
-    
+
     def set_duty_cycle(self, duty_cycle_percentage):
         """
         Set the duty cycle percentage, i.e. brightness level.
@@ -86,7 +93,7 @@ class Light:
             self.led.value = duty
         else:
             raise ValueError("Speed must be between 0 and 100")
-        
+
     def get_duty_cycle(self):
         """
         Get the current duty cycle percentage.
@@ -101,16 +108,18 @@ class Light:
     def close(self):
         self.led.close()
 
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Control an IoT light.')
-    parser.add_argument('--on', action='store_true', help='Turn the light on.')
-    parser.add_argument('--off', action='store_true', help='Turn the light off.')
-    parser.add_argument('--brightness', type=int, default=None,
-                        help='Set the brightness level (0-100).')
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Control an IoT light.")
+    parser.add_argument("--on", action="store_true", help="Turn the light on.")
+    parser.add_argument("--off", action="store_true", help="Turn the light off.")
+    parser.add_argument(
+        "--brightness", type=int, default=None, help="Set the brightness level (0-100)."
+    )
 
     args = parser.parse_args()
 
-    light = Light(18)  # Default frequency of 8kHz
+    light = Light()  # pins/frequency from config
 
     if args.on:
         light.on()
