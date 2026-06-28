@@ -7,6 +7,30 @@ LOG_FILE="/tmp/install_packages.log"
 PYTHON_ENV_LOG_FILE="/tmp/setup_python_env.log"
 VERBOSE=false
 
+# Safety flags
+DRY_RUN=false
+ASSUME_YES=false
+for _arg in "$@"; do
+    case "$_arg" in
+        --dry-run) DRY_RUN=true ;;
+        -y|--yes) ASSUME_YES=true ;;
+        -v|--verbose) VERBOSE=true ;;
+        -h|--help)
+            cat <<'USAGE'
+Usage: bin/setup.sh [--dry-run] [--yes] [--verbose]
+
+  --dry-run   Print every system change that would be made, then exit.
+              Makes NO changes. Run this first if you're unsure.
+  --yes       Skip the confirmation prompt.
+  --verbose   Extra logging.
+
+setup.sh backs up every system file it edits to <file>.garden.bak, and
+bin/uninstall.sh reverses the install. See docs/access.md.
+USAGE
+            exit 0 ;;
+    esac
+done
+
 # Colors
 GRN="\e[32m"
 RED="\e[31m"
@@ -31,6 +55,26 @@ function log {
     if [ "$VERBOSE" == "true" ]; then
         #echo "$@"
         echo -e "[${GRY}INFO${RST}]: ${LGY}$*${RST}" >&2
+    fi
+}
+
+# Make a one-time backup of a system file before modifying it, so every change
+# is reversible (bin/uninstall.sh restores these).
+function _backup_file {
+    local f="$1"
+    if [ -f "$f" ] && [ ! -f "${f}.garden.bak" ]; then
+        sudo cp -a "$f" "${f}.garden.bak" && log_info "Backed up $f -> ${f}.garden.bak"
+    fi
+}
+
+# Locate the active boot config. Raspberry Pi OS Bookworm uses /boot/firmware.
+function boot_config_path {
+    if [ -f /boot/firmware/config.txt ]; then
+        echo /boot/firmware/config.txt
+    elif [ -f /boot/config.txt ]; then
+        echo /boot/config.txt
+    else
+        echo ""
     fi
 }
 
@@ -93,19 +137,31 @@ function setup_python_env {
 # Function to enable I2C in /boot/config.txt and configure I2C
 # See https://github.com/fivdi/i2c-bus/blob/master/doc/raspberry-pi-i2c.md
 function enable_i2c_config_txt() {
-    local config_file="/boot/config.txt"
-    local param="dtparam=i2c_arm=on"
-    log "Enabling I2C in $config_file..."
+    local config_file param="dtparam=i2c_arm=on"
+    config_file="$(boot_config_path)"
 
-    # Remove any existing line with dtparam=i2c_arm and add the correct one
-    sudo sed -i "/^#*dtparam=i2c_arm/c\\$param" "$config_file"
-    log "I2C has been enabled in $config_file."
+    if [ -n "$config_file" ]; then
+        _backup_file "$config_file"
+        log "Enabling I2C in $config_file..."
+        if grep -q "^#*dtparam=i2c_arm" "$config_file"; then
+            # Replace the existing (possibly commented) line.
+            sudo sed -i "/^#*dtparam=i2c_arm/c\\$param" "$config_file"
+        else
+            # No line present: append it (the old replace-only logic silently
+            # did nothing here, leaving I2C disabled in config.txt).
+            echo "$param" | sudo tee -a "$config_file" > /dev/null
+        fi
+        log_pass "I2C enabled in $config_file."
+    else
+        log_error "No config.txt found in /boot or /boot/firmware; relying on raspi-config for I2C."
+    fi
 
-    # Enable I2C interface
+    # Enable I2C interface via raspi-config (edits the correct file itself).
     sudo raspi-config nonint do_i2c 0
 
-    # Check if i2c-dev is already in /etc/modules
+    # Ensure the i2c-dev module loads on boot.
     log "Configuring I2C modules..."
+    _backup_file /etc/modules
     sudo sed -i '/^#*i2c-dev/d' /etc/modules
     echo "i2c-dev" | sudo tee -a /etc/modules > /dev/null
 }
@@ -274,6 +330,7 @@ function setup_mdns_hostname {
         sudo hostnamectl set-hostname "$desired" 2>/dev/null || true
         # Keep /etc/hosts in sync so sudo doesn't complain.
         if ! grep -q "127.0.1.1.*$desired" /etc/hosts; then
+            _backup_file /etc/hosts
             echo "127.0.1.1 $desired" | sudo tee -a /etc/hosts > /dev/null
         fi
     fi
@@ -314,6 +371,7 @@ User=$USER
 WorkingDirectory=$INSTALL_DIR
 ExecStart=$INSTALL_DIR/venv/bin/python $INSTALL_DIR/mqtt.py
 Restart=always
+RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
@@ -342,6 +400,7 @@ User=$USER
 WorkingDirectory=$INSTALL_DIR
 ExecStart=$INSTALL_DIR/venv/bin/waitress-serve --listen=0.0.0.0:5000 run:app
 Restart=always
+RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
@@ -366,8 +425,46 @@ function verify_api {
     fi
 }
 
+# Summarize the system-level changes before touching anything.
+function print_plan {
+    local cfg
+    cfg="$(boot_config_path)"
+    [ -z "$cfg" ] && cfg="(no config.txt found)"
+    cat >&2 <<PLAN
+
+=== Garden of Eden setup — planned system changes (sudo) ===
+  1. apt install: i2c-tools fswebcam pigpio python3(-pip,-venv)
+     mosquitto(-clients) openssh-server avahi-daemon
+  2. Create Python venv in $INSTALL_DIR/venv and pip install requirements
+  3. Enable I2C: edit $cfg, /etc/modules, and raspi-config   [backups: *.garden.bak]
+  4. Add user '$(whoami)' to groups: i2c, gpio, dialout
+  5. Symlink /usr/local/bin/{light,water,garden-update}
+  6. Install camera udev rules -> /etc/udev/rules.d/
+  7. Enable SSH; set hostname '${GARDEN_HOSTNAME:-gardyn}' + avahi   [backup: /etc/hosts.garden.bak]
+  8. Install + enable systemd services: mqtt.service, garden-api.service
+Reversible with: bin/uninstall.sh
+============================================================
+
+PLAN
+}
+
 # Main script execution
 cd $INSTALL_DIR
+
+print_plan
+
+if [ "$DRY_RUN" = "true" ]; then
+    log_info "Dry run complete — NO changes were made. Re-run without --dry-run to apply."
+    exit 0
+fi
+
+if [ "$ASSUME_YES" != "true" ]; then
+    read -r -p "Proceed with these changes? [y/N] " _ans
+    case "$_ans" in
+        y|Y|yes|YES) ;;
+        *) log_info "Aborted by user — no changes made."; exit 0 ;;
+    esac
+fi
 
 check_os_compatibility
 

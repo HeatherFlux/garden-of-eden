@@ -31,8 +31,27 @@ which serves the web UI/REST API on boot.
 git clone https://github.com/iot-root/garden-of-eden.git
 cd garden-of-eden
 cp .env-dist .env && nano .env
-./bin/setup.sh
+
+./bin/setup.sh --dry-run   # preview every system change; makes NO changes
+./bin/setup.sh             # prompts for confirmation before applying
 ```
+
+### Safety
+
+`setup.sh` is designed not to brick the device:
+
+- **`--dry-run`** prints every `sudo` change and exits without touching anything.
+- It **prompts for confirmation** before applying (skip with `--yes`).
+- Every system file it edits (`config.txt`, `/etc/modules`, `/etc/hosts`) is
+  **backed up** to `<file>.garden.bak` first.
+- It detects the correct boot config path (`/boot/firmware/config.txt` on
+  Bookworm, `/boot/config.txt` on older releases).
+- **`bin/uninstall.sh`** reverses the install: stops/removes the services,
+  removes symlinks/udev rules and our cron entries, and restores the backups.
+  (It leaves apt packages, group membership, and SSH enabled — harmless.)
+
+If a boot/I2C change ever causes trouble, pop the SD card into any computer and
+restore `config.txt` from `config.txt.garden.bak` on the boot partition.
 
 ## 3. Use it
 
