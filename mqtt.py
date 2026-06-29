@@ -312,8 +312,9 @@ def send_discovery_messages(client):
         "payload_not_available": "offline",
     }
 
-    def pub(topic, payload):
-        client.publish(topic, json.dumps({**payload, **avail}), retain=True)
+    def pub(topic, payload, availability=True):
+        body = {**payload, **avail} if availability else dict(payload)
+        client.publish(topic, json.dumps(body), retain=True)
 
     # Config for Light
     TEMP_CONFIG_TOPIC = "homeassistant/light/gardyn/" + IDENTIFIER + "_light/config"
@@ -455,12 +456,14 @@ def send_discovery_messages(client):
         "name": "Upper Camera",
         "unique_id": IDENTIFIER + "_upper_camera",
         "image_topic": BASE_TOPIC + "/image/upper_camera",
-        "encoding": "b64",
+        "encoding": "",
         "content_type": "image/jpeg",
         "object_id": IDENTIFIER + "_upper_camera",
         "device": device_info,
     }
-    pub(TEMP_CONFIG_TOPIC, temp_config_payload)
+    # Image entities aren't gated on availability (the MQTT image platform
+    # mishandles it here) — they just show the last retained frame.
+    pub(TEMP_CONFIG_TOPIC, temp_config_payload, availability=False)
 
     # Discovery configuration for Camera B (image entity)
     TEMP_CONFIG_TOPIC = "homeassistant/image/gardyn/" + IDENTIFIER + "_lower_camera/config"
@@ -468,12 +471,12 @@ def send_discovery_messages(client):
         "name": "Lower Camera",
         "unique_id": IDENTIFIER + "_lower_camera",
         "image_topic": BASE_TOPIC + "/image/lower_camera",
-        "encoding": "b64",
+        "encoding": "",
         "content_type": "image/jpeg",
         "object_id": IDENTIFIER + "_lower_camera",
         "device": device_info,
     }
-    pub(TEMP_CONFIG_TOPIC, temp_config_payload)
+    pub(TEMP_CONFIG_TOPIC, temp_config_payload, availability=False)
 
     # Config for the physical button as a Home Assistant event entity (#78).
     # Fires "single"/"double"/"long" so HA automations can react to presses.
@@ -660,6 +663,10 @@ def publish_water_level(client):
         if distance is not None:
             logger.info(f"Publishing Water Level: {distance:.2f}cm")
             client.publish(BASE_TOPIC + "/water/level", f"{distance:.2f}")
+            # Keep the low-water binary sensor current from the same reading
+            # (otherwise it sits at "unknown" until the threshold is changed).
+            low = "ON" if is_water_low(distance, WATER_LOW_CM) else "OFF"
+            client.publish(BASE_TOPIC + "/water/low/state", low, retain=True)
         sleep(30 * 60)
 
 
@@ -713,7 +720,7 @@ def publish_images(client):
                     BASE_TOPIC + "/image/upper_camera",
                     payload=upper_cam_jpeg_data,
                     qos=0,
-                    retain=False,
+                    retain=True,
                 )
                 logger.info("Published image to /image/upper_camera")
 
@@ -724,7 +731,7 @@ def publish_images(client):
                     BASE_TOPIC + "/image/lower_camera",
                     payload=lower_cam_jpeg_data,
                     qos=0,
-                    retain=False,
+                    retain=True,
                 )
                 logger.info("Published image to /image/lower_camera")
 
