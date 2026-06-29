@@ -22,8 +22,10 @@ Older single-window schedules (``lights.onTime`` / ``pump.runs``) are migrated
 to this shape on load, so existing saved schedules and clients keep working.
 """
 
+import datetime
 import json
 import logging
+import os
 import subprocess
 
 import config
@@ -34,6 +36,16 @@ CRON_MARKER = "# garden-of-eden"
 LIGHT_CMD = "/usr/local/bin/light"
 WATER_CMD = "/usr/local/bin/water"
 
+# schedule-refresh CLI (absolute path): run nightly so vacation mode auto-expires.
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+REFRESH_CMD = os.path.join(_REPO_ROOT, "bin", "schedule-refresh.sh")
+
+# Reduced light/water applied to every day while Vacation mode is active.
+VACATION_PROFILE = {
+    "lights": [{"onTime": "10:00", "offTime": "16:00", "brightness": 50}],
+    "pump": [{"time": "12:00", "duration": 3}],
+}
+
 # Weekday order and the cron day-of-week number each maps to (cron: Sun=0).
 DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 DAY_TO_CRON = {"mon": 1, "tue": 2, "wed": 3, "thu": 4, "fri": 5, "sat": 6, "sun": 0}
@@ -41,6 +53,7 @@ DAY_TO_CRON = {"mon": 1, "tue": 2, "wed": 3, "thu": 4, "fri": 5, "sat": 6, "sun"
 DEFAULT_SCHEDULE = {
     "lights": {"enabled": False, "days": {d: [] for d in DAYS}},
     "pump": {"enabled": False, "days": {d: [] for d in DAYS}},
+    "vacation": {"enabled": False, "until": None},
 }
 
 
@@ -85,9 +98,15 @@ def normalize_schedule(schedule):
         runs = [dict(r) for r in pump["runs"]]
         pump_days = {d: [dict(r) for r in runs] for d in DAYS}
 
+    vacation = dict(schedule.get("vacation") or {})
+
     return {
         "lights": {"enabled": bool(lights.get("enabled")), "days": light_days},
         "pump": {"enabled": bool(pump.get("enabled")), "days": pump_days},
+        "vacation": {
+            "enabled": bool(vacation.get("enabled")),
+            "until": vacation.get("until") or None,
+        },
     }
 
 
@@ -122,9 +141,49 @@ def _pump_seconds(duration_minutes):
     return min(seconds, config.MAX_PUMP_RUN_SECONDS)
 
 
+def is_vacation_active(schedule, today=None):
+    """True when Vacation mode is on and not past its end date (``until``)."""
+    vacation = schedule.get("vacation") or {}
+    if not vacation.get("enabled"):
+        return False
+    until = vacation.get("until")
+    if not until:
+        return True  # no end date -> active until manually turned off
+    today = today or datetime.date.today()
+    try:
+        return today <= datetime.date.fromisoformat(until)
+    except ValueError:
+        return True
+
+
+def _vacation_cron_lines():
+    """Minimal keep-alive light/water for every day, plus a nightly refresh so
+    vacation mode reverts to the normal schedule once its end date passes."""
+    lines = []
+    for day in DAYS:
+        dow = DAY_TO_CRON[day]
+        for window in VACATION_PROFILE["lights"]:
+            on_m, on_h = _hh_mm(window["onTime"])
+            off_m, off_h = _hh_mm(window["offTime"])
+            brightness = int(window["brightness"])
+            lines.append(f"{on_m} {on_h} * * {dow} {LIGHT_CMD} {brightness} {CRON_MARKER}")
+            lines.append(f"{off_m} {off_h} * * {dow} {LIGHT_CMD} off {CRON_MARKER}")
+        for run in VACATION_PROFILE["pump"]:
+            run_m, run_h = _hh_mm(run["time"])
+            seconds = _pump_seconds(run["duration"])
+            lines.append(f"{run_m} {run_h} * * {dow} {WATER_CMD} {seconds} {CRON_MARKER}")
+    lines.append(f"2 0 * * * {REFRESH_CMD} {CRON_MARKER}")
+    return lines
+
+
 def build_cron_lines(schedule):
     """Compile a (normalized) schedule dict into a list of marked crontab lines."""
     schedule = normalize_schedule(schedule)
+
+    # Vacation mode overrides the normal schedule with a reduced keep-alive one.
+    if is_vacation_active(schedule):
+        return _vacation_cron_lines()
+
     lines = []
 
     lights = schedule["lights"]
@@ -182,3 +241,16 @@ def apply_schedule(schedule):
     _write_crontab(existing + cron_lines)
     logger.info("Applied schedule with %d cron entries", len(cron_lines))
     return schedule
+
+
+def refresh():
+    """Re-apply the saved schedule, turning Vacation mode off once its end date
+    has passed. Run nightly via cron so vacation auto-expires to the normal
+    schedule."""
+    schedule = load_schedule()
+    vacation = schedule.get("vacation") or {}
+    if vacation.get("enabled") and not is_vacation_active(schedule):
+        vacation["enabled"] = False
+        schedule["vacation"] = vacation
+        logger.info("Vacation mode expired; reverting to the normal schedule")
+    return apply_schedule(schedule)
