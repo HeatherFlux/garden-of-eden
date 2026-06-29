@@ -101,7 +101,7 @@ function install_packages {
     show_spinner
     wait $!
     log_info "Installing packages"
-    sudo apt install -y i2c-tools fswebcam pigpio python3 python3-pip python3-venv mosquitto mosquitto-clients openssh-server avahi-daemon >> "$LOG_FILE" 2>&1 &
+    sudo apt install -y i2c-tools fswebcam ffmpeg pigpio python3 python3-pip python3-venv mosquitto mosquitto-clients openssh-server avahi-daemon >> "$LOG_FILE" 2>&1 &
     show_spinner
     wait $!
     if [ $? -ne 0 ]; then
@@ -465,7 +465,7 @@ function print_plan {
     cat >&2 <<PLAN
 
 === Garden of Eden setup — planned system changes (sudo) ===
-  1. apt install: i2c-tools fswebcam pigpio python3(-pip,-venv)
+  1. apt install: i2c-tools fswebcam ffmpeg pigpio python3(-pip,-venv)
      mosquitto(-clients) openssh-server avahi-daemon
   2. Create Python venv in $INSTALL_DIR/venv and pip install requirements
   3. Enable I2C: edit $cfg, /etc/modules, and raspi-config   [backups: *.garden.bak]

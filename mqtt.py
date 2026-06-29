@@ -18,6 +18,7 @@ from app.lib import state as state_lib
 from app.lib.hardware import detect_model, get_pin_factory
 from app.lib.logging_config import configure_logging
 from app.lib.water import is_water_low
+from app.sensors.camera import camera as camera_mod
 from app.sensors.distance.distance import MeasurementError
 from app.sensors.distance.routes import distance_control
 from app.sensors.humidity.humidity import humidity_sensor
@@ -700,6 +701,10 @@ def publish_images(client):
                 ]
             )
             logger.info(f"Captured image from lower camera ({LOWER_CAMERA_DEVICE})")
+
+            # Archive timestamped frames for timelapse assembly.
+            camera_mod.archive_frame(UPPER_IMAGE_PATH, "upper")
+            camera_mod.archive_frame(LOWER_IMAGE_PATH, "lower")
 
             # Publish upper camera image
             with open(UPPER_IMAGE_PATH, "rb") as f:
