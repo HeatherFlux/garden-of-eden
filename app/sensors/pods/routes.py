@@ -11,7 +11,13 @@ pods_blueprint = Blueprint("pods", __name__)
 
 @pods_blueprint.route("", methods=["GET"])
 def get_pods():
-    return jsonify({"pods": pods_lib.load_pods(), "shapes": pods_lib.SHAPES})
+    return jsonify(
+        {
+            "pods": pods_lib.load_pods(),
+            "shapes": pods_lib.SHAPES,
+            "catalog": pods_lib.load_catalog(),
+        }
+    )
 
 
 @pods_blueprint.route("", methods=["POST"])

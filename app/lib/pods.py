@@ -7,8 +7,11 @@ names/codes are dropped on normalize so the file can't drift out of spec.
 """
 
 import json
+import os
 
 import config
+
+_CATALOG_PATH = os.path.join(os.path.dirname(__file__), "plants.json")
 
 # Allowed symbol keys; the UI renders each as a geometric glyph.
 SHAPES = ["circle", "square", "triangle", "diamond", "star", "hexagon", "heart", "plus"]
@@ -18,6 +21,16 @@ MAX_NAME = 40
 
 def default_pods():
     return [{"id": i + 1, "name": "", "symbols": []} for i in range(config.POD_COUNT)]
+
+
+def load_catalog():
+    """The plant variety catalog (name/category/light/difficulty/guide) used to
+    populate the UI's variety picker. Returns [] if the data file is missing."""
+    try:
+        with open(_CATALOG_PATH) as fh:
+            return json.load(fh)
+    except (FileNotFoundError, ValueError):
+        return []
 
 
 def _clean(pod):
