@@ -500,6 +500,20 @@ def send_discovery_messages(client):
     }
     pub(TEMP_CONFIG_TOPIC, temp_config_payload)
 
+    # "Add Plant Food" alarm — ON when the recurring nutrient reminder is due.
+    TEMP_CONFIG_TOPIC = f"homeassistant/binary_sensor/gardyn/{IDENTIFIER}_food/config"
+    temp_config_payload = {
+        "name": "Add Plant Food",
+        "unique_id": IDENTIFIER + "_food",
+        "state_topic": BASE_TOPIC + "/grow/food",
+        "device_class": "problem",
+        "payload_on": "ON",
+        "payload_off": "OFF",
+        "icon": "mdi:bottle-tonic-plus",
+        "device": device_info,
+    }
+    pub(TEMP_CONFIG_TOPIC, temp_config_payload)
+
 
 def on_connect(client, userdata, flags, rc, properties=None):
     logger.info(f"Connected with result code {rc}")
@@ -744,7 +758,12 @@ def publish_grow_reminders(client):
         try:
             grow_state = grow_lib.load_state()
             client.publish(BASE_TOPIC + "/grow/stage", grow_state.get("stage", ""), retain=True)
-            for reminder in grow_lib.due_reminders(grow_state):
+            due = grow_lib.due_reminders(grow_state)
+            # Dedicated "add plant food" alarm for Home Assistant.
+            client.publish(
+                BASE_TOPIC + "/grow/food", "ON" if "nutrient" in due else "OFF", retain=True
+            )
+            for reminder in due:
                 client.publish(BASE_TOPIC + "/grow/reminder", reminder)
                 logger.info("Published grow reminder: %s", reminder)
         except Exception:
