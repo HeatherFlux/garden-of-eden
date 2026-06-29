@@ -18,11 +18,12 @@ from app.lib import state as state_lib
 from app.lib.hardware import detect_model, get_pin_factory
 from app.lib.logging_config import configure_logging
 from app.lib.water import is_water_low
-from app.sensors.distance.distance import Distance, MeasurementError
+from app.sensors.distance.distance import MeasurementError
+from app.sensors.distance.routes import distance_control
 from app.sensors.humidity.humidity import humidity_sensor
-from app.sensors.light.light import Light
+from app.sensors.light.routes import light_control
 from app.sensors.pcb_temp.pcb_temp import get_pcb_temperature
-from app.sensors.pump.pump import Pump
+from app.sensors.pump.routes import pump_control
 from app.sensors.temperature.temperature import temperature_sensor
 from config import (
     BASE_TOPIC,
@@ -48,12 +49,14 @@ from config import (
 configure_logging()
 logger = logging.getLogger(__name__)
 
-# Initialize devices on the shared pigpio pin factory (issue #67).
+# Reuse the singleton drivers the route modules already created at import time.
+# Importing `app` instantiates pump/light/distance on their GPIO pins; creating a
+# second copy of each here raised GPIOPinInUse and crash-looped the service.
 pin_factory = get_pin_factory()
 
-pump = Pump(pin_factory=pin_factory)
-light = Light(pin_factory=pin_factory)
-distance_sensor = Distance(pin_factory=pin_factory)
+pump = pump_control
+light = light_control
+distance_sensor = distance_control
 
 # default on brightness
 brightness = 50
@@ -177,16 +180,18 @@ def flash_lights(times=3, delay=0.3):
 
 
 def safe_distance_measure():
-    global distance_sensor
+    # Reuses the shared distance driver; re-instantiating would raise
+    # GPIOPinInUse against the copy the API already holds.
+    if distance_sensor is None:
+        return None
     try:
         return distance_sensor.measure_once()
     except MeasurementError as e:
-        logger.warning(f"Distance measure failed: {e}, trying recovery")
+        logger.warning(f"Distance measure failed: {e}, retrying once")
         try:
-            distance_sensor = Distance(pin_factory=pin_factory)
             return distance_sensor.measure_once()
         except Exception as e2:
-            logger.error(f"Distance full recovery failed: {e2}")
+            logger.error(f"Distance recovery failed: {e2}")
             return None
 
 
