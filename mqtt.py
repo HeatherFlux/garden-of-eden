@@ -35,6 +35,7 @@ from config import (
     KEEP_ALIVE_INTERVAL,
     LOWER_CAMERA_DEVICE,
     LOWER_IMAGE_PATH,
+    MAX_PUMP_RUN_SECONDS,
     MODEL,
     PASSWORD,
     PORT,
@@ -45,9 +46,30 @@ from config import (
     WATER_LOW_CM,
 )
 
-# Configure logging (shared config; level via LOG_LEVEL env).
-configure_logging()
+# Configure logging (shared config; level via LOG_LEVEL env). Use a dedicated
+# file so the MQTT service and the REST API don't write the same log.
+configure_logging(log_file="mqtt.log")
 logger = logging.getLogger(__name__)
+
+
+class MqttLogHandler(logging.Handler):
+    """Publish WARNING+ log records to MQTT so Home Assistant can surface recent
+    issues (exposed as the 'Last Log' sensor). Best-effort: silently skips when
+    the client isn't connected yet."""
+
+    def __init__(self, mqtt_client, topic):
+        super().__init__(level=logging.WARNING)
+        self._client = mqtt_client
+        self._topic = topic
+
+    def emit(self, record):
+        try:
+            if self._client.is_connected():
+                # HA sensor states are capped at 255 characters.
+                self._client.publish(self._topic, self.format(record)[:255])
+        except Exception:
+            pass
+
 
 # Reuse the singleton drivers the route modules already created at import time.
 # Importing `app` instantiates pump/light/distance on their GPIO pins; creating a
@@ -80,6 +102,46 @@ double_press_time = 1  # Time to detect a double press (in seconds)
 press_count = 0
 double_press_timer = None
 
+# MQTT topics for device availability (LWT) and a 'last log' diagnostic feed.
+AVAILABILITY_TOPIC = BASE_TOPIC + "/availability"
+LOG_TOPIC = BASE_TOPIC + "/log"
+
+# Pump safety: never let the pump run longer than the hard cap, no matter how it
+# was turned on (HA command or physical button). Mirrors the REST API watchdog.
+_pump_off_timer = None
+_pump_timer_lock = threading.Lock()
+
+
+def _safety_pump_off():
+    global pump_state
+    logger.warning("Pump safety cap (%ss) reached; forcing pump OFF", MAX_PUMP_RUN_SECONDS)
+    try:
+        pump.off()
+        pump_state = False
+        client.publish(BASE_TOPIC + "/pump/state", "OFF")
+        state_lib.save_state(pump_on=False, speed=speed)
+    except Exception as exc:
+        logger.error("Safety pump-off failed: %s", exc)
+
+
+def _arm_pump_safety():
+    """(Re)arm the auto-off timer whenever the pump is energized."""
+    global _pump_off_timer
+    with _pump_timer_lock:
+        if _pump_off_timer is not None:
+            _pump_off_timer.cancel()
+        _pump_off_timer = Timer(MAX_PUMP_RUN_SECONDS, _safety_pump_off)
+        _pump_off_timer.daemon = True
+        _pump_off_timer.start()
+
+
+def _cancel_pump_safety():
+    global _pump_off_timer
+    with _pump_timer_lock:
+        if _pump_off_timer is not None:
+            _pump_off_timer.cancel()
+            _pump_off_timer = None
+
 
 # Button press callbacks
 def toggle_light():
@@ -102,10 +164,12 @@ def toggle_pump():
     if pump_state:
         logger.info("Toggling Pump ON")
         pump.set_speed(speed)
+        _arm_pump_safety()
         client.publish(BASE_TOPIC + "/pump/state", "ON")
     else:
         logger.info("Toggling Pump OFF")
         pump.off()
+        _cancel_pump_safety()
         client.publish(BASE_TOPIC + "/pump/state", "OFF")
     state_lib.save_state(pump_on=pump_state, speed=speed)
 
@@ -239,6 +303,17 @@ def send_discovery_messages(client):
         "sw_version": VERSION,
     }
 
+    # Every entity shares the device availability topic so HA greys the whole
+    # device out when the Pi/service is down.
+    avail = {
+        "availability_topic": AVAILABILITY_TOPIC,
+        "payload_available": "online",
+        "payload_not_available": "offline",
+    }
+
+    def pub(topic, payload):
+        client.publish(topic, json.dumps({**payload, **avail}), retain=True)
+
     # Config for Light
     TEMP_CONFIG_TOPIC = "homeassistant/light/gardyn/" + IDENTIFIER + "_light/config"
     temp_config_payload = {
@@ -252,7 +327,7 @@ def send_discovery_messages(client):
         "brightness_scale": 100,
         "device": device_info,
     }
-    client.publish(TEMP_CONFIG_TOPIC, json.dumps(temp_config_payload), retain=True)
+    pub(TEMP_CONFIG_TOPIC, temp_config_payload)
 
     # Config for Pump (as a light with speed control, for example)
     # todo: maybe use fan instead....
@@ -275,7 +350,7 @@ def send_discovery_messages(client):
         "icon": "mdi:water-pump",
         "device": device_info,
     }
-    client.publish(TEMP_CONFIG_TOPIC, json.dumps(temp_config_payload), retain=True)
+    pub(TEMP_CONFIG_TOPIC, temp_config_payload)
 
     # Config for Temperature from PCB
     TEMP_CONFIG_TOPIC = "homeassistant/sensor/gardyn/" + IDENTIFIER + "_pcb_temp/config"
@@ -287,7 +362,7 @@ def send_discovery_messages(client):
         "device_class": "temperature",
         "device": device_info,
     }
-    client.publish(TEMP_CONFIG_TOPIC, json.dumps(temp_config_payload), retain=True)
+    pub(TEMP_CONFIG_TOPIC, temp_config_payload)
 
     # Config for Temperature Sensor
     TEMP_CONFIG_TOPIC = "homeassistant/sensor/gardyn/" + IDENTIFIER + "_temperature/config"
@@ -300,7 +375,7 @@ def send_discovery_messages(client):
         "device_class": "temperature",
         "device": device_info,
     }
-    client.publish(TEMP_CONFIG_TOPIC, json.dumps(temp_config_payload), retain=True)
+    pub(TEMP_CONFIG_TOPIC, temp_config_payload)
 
     # Config for Humidity Sensor
     TEMP_CONFIG_TOPIC = "homeassistant/sensor/gardyn/" + IDENTIFIER + "_humidity/config"
@@ -313,7 +388,7 @@ def send_discovery_messages(client):
         "device_class": "humidity",
         "device": device_info,
     }
-    client.publish(TEMP_CONFIG_TOPIC, json.dumps(temp_config_payload), retain=True)
+    pub(TEMP_CONFIG_TOPIC, temp_config_payload)
 
     # Config for Water Level Sensor
     TEMP_CONFIG_TOPIC = "homeassistant/sensor/gardyn/" + IDENTIFIER + "_water_level/config"
@@ -327,7 +402,7 @@ def send_discovery_messages(client):
         "device_class": "distance",
         "device": device_info,
     }
-    client.publish(TEMP_CONFIG_TOPIC, json.dumps(temp_config_payload), retain=True)
+    pub(TEMP_CONFIG_TOPIC, temp_config_payload)
 
     # Config for Water Low Binary Sensor
     TEMP_CONFIG_TOPIC = f"homeassistant/binary_sensor/gardyn/{IDENTIFIER}_water_low/config"
@@ -341,7 +416,7 @@ def send_discovery_messages(client):
         "payload_off": "OFF",
         "device": device_info,
     }
-    client.publish(TEMP_CONFIG_TOPIC, json.dumps(temp_config_payload), retain=True)
+    pub(TEMP_CONFIG_TOPIC, temp_config_payload)
 
     # Config for Water Low Threshold (current value)
     # Config for Water Low CM Set Number
@@ -359,7 +434,7 @@ def send_discovery_messages(client):
         "device_class": "distance",
         "device": device_info,
     }
-    client.publish(TEMP_CONFIG_TOPIC, json.dumps(temp_config_payload), retain=True)
+    pub(TEMP_CONFIG_TOPIC, temp_config_payload)
 
     # Config for Water Low Mode (Enabled/Disabled)
     TEMP_CONFIG_TOPIC = f"homeassistant/sensor/gardyn/{IDENTIFIER}_water_low_mode/config"
@@ -371,7 +446,7 @@ def send_discovery_messages(client):
         "icon": "mdi:toggle-switch",  # Optional: or use mdi:alert for dramatic effect
         "device": device_info,
     }
-    client.publish(TEMP_CONFIG_TOPIC, json.dumps(temp_config_payload), retain=True)
+    pub(TEMP_CONFIG_TOPIC, temp_config_payload)
 
     # Discovery configuration for Camera A (image entity)
     TEMP_CONFIG_TOPIC = "homeassistant/image/gardyn/" + IDENTIFIER + "_upper_camera/config"
@@ -384,7 +459,7 @@ def send_discovery_messages(client):
         "object_id": IDENTIFIER + "_upper_camera",
         "device": device_info,
     }
-    client.publish(TEMP_CONFIG_TOPIC, json.dumps(temp_config_payload), retain=True)
+    pub(TEMP_CONFIG_TOPIC, temp_config_payload)
 
     # Discovery configuration for Camera B (image entity)
     TEMP_CONFIG_TOPIC = "homeassistant/image/gardyn/" + IDENTIFIER + "_lower_camera/config"
@@ -397,7 +472,7 @@ def send_discovery_messages(client):
         "object_id": IDENTIFIER + "_lower_camera",
         "device": device_info,
     }
-    client.publish(TEMP_CONFIG_TOPIC, json.dumps(temp_config_payload), retain=True)
+    pub(TEMP_CONFIG_TOPIC, temp_config_payload)
 
     # Config for the physical button as a Home Assistant event entity (#78).
     # Fires "single"/"double"/"long" so HA automations can react to presses.
@@ -410,13 +485,28 @@ def send_discovery_messages(client):
         "device_class": "button",
         "device": device_info,
     }
-    client.publish(TEMP_CONFIG_TOPIC, json.dumps(temp_config_payload), retain=True)
+    pub(TEMP_CONFIG_TOPIC, temp_config_payload)
+
+    # Diagnostic 'Last Log' sensor: most recent WARNING/ERROR published by the
+    # MQTT log handler, for at-a-glance debugging from Home Assistant.
+    TEMP_CONFIG_TOPIC = f"homeassistant/sensor/gardyn/{IDENTIFIER}_log/config"
+    temp_config_payload = {
+        "name": "Last Log",
+        "unique_id": IDENTIFIER + "_log",
+        "state_topic": LOG_TOPIC,
+        "icon": "mdi:text-box-outline",
+        "entity_category": "diagnostic",
+        "device": device_info,
+    }
+    pub(TEMP_CONFIG_TOPIC, temp_config_payload)
 
 
 def on_connect(client, userdata, flags, rc, properties=None):
     logger.info(f"Connected with result code {rc}")
     client.subscribe(BASE_TOPIC + "/#")
     # client.subscribe(BASE_TOPIC + "/light/brightness/set")
+    # Mark the device online (counterpart to the LWT 'offline' set before connect).
+    client.publish(AVAILABILITY_TOPIC, "online", retain=True)
     send_discovery_messages(client)
     publish_water_low_mode(client)
 
@@ -454,14 +544,20 @@ def on_message(client, userdata, msg):
                     else:
                         client.publish(BASE_TOPIC + "/water/low/state", "OFF", retain=True)
                 pump.set_speed(speed)
+                _arm_pump_safety()
                 client.publish(BASE_TOPIC + "/pump/state", "ON")
             elif payload.upper() == "OFF":
                 pump.off()
+                _cancel_pump_safety()
                 client.publish(BASE_TOPIC + "/pump/state", "OFF")
 
         elif topic_suffix == "pump/speed/set" and payload.isdigit():
             speed = int(payload)
             pump.set_speed(speed)
+            if speed > 0:
+                _arm_pump_safety()
+            else:
+                _cancel_pump_safety()
             client.publish(BASE_TOPIC + "/pump/speed/state", str(speed))
 
         # === Light Logic ===
@@ -635,6 +731,7 @@ def restore_actuator_state(client):
         if saved.get("pump_on"):
             pump_state = True
             pump.set_speed(speed)
+            _arm_pump_safety()
             client.publish(BASE_TOPIC + "/pump/state", "ON")
         logger.info("Restored actuator state: %s", saved)
     except Exception as exc:
@@ -676,6 +773,15 @@ if __name__ == "__main__":
     client.on_connect = on_connect
     client.on_message = on_message
     client.username_pw_set(USERNAME, PASSWORD)
+    # Last Will: broker marks us offline in HA if the connection drops.
+    client.will_set(AVAILABILITY_TOPIC, "offline", retain=True)
+
+    # Mirror WARNING+ logs to MQTT for the HA 'Last Log' sensor. Skip paho's own
+    # logger to avoid any publish/log feedback.
+    mqtt_log_handler = MqttLogHandler(client, LOG_TOPIC)
+    mqtt_log_handler.addFilter(lambda record: not record.name.startswith("paho"))
+    logging.getLogger().addHandler(mqtt_log_handler)
+
     client.connect(BROKER, PORT, KEEP_ALIVE_INTERVAL)
 
     pcb_temp_thread = threading.Thread(target=publish_pcb_temperature, args=(client,))
