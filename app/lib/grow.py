@@ -13,6 +13,7 @@ import json
 from datetime import datetime
 
 import config
+from app.lib.persist import write_json_atomic
 
 STAGES = ["germination", "thinning", "root_check", "harvest"]
 
@@ -31,8 +32,7 @@ def load_state():
 
 
 def save_state(state):
-    with open(config.GROW_STATE_FILE, "w") as fh:
-        json.dump(state, fh, indent=2)
+    write_json_atomic(config.GROW_STATE_FILE, state)
 
 
 def start_cycle(now=None):

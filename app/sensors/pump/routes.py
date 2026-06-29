@@ -4,6 +4,7 @@ import threading
 from flask import Blueprint, jsonify, request
 
 import config
+from app.lib import state as state_lib
 from app.lib.hardware import get_pin_factory
 from app.lib.lib import check_sensor_guard, parse_level
 
@@ -33,13 +34,19 @@ _run_timer = None
 _run_lock = threading.Lock()
 
 
+def _safety_off():
+    """Stop the pump and record it off, so persisted state stays accurate."""
+    pump_control.off()
+    state_lib.save_state(pump_on=False)
+
+
 def _arm_auto_off(seconds):
     """(Re)arm the single auto-off timer to stop the pump after ``seconds``."""
     global _run_timer
     with _run_lock:
         if _run_timer is not None:
             _run_timer.cancel()  # supersede any in-flight run
-        _run_timer = threading.Timer(seconds, pump_control.off)
+        _run_timer = threading.Timer(seconds, _safety_off)
         _run_timer.daemon = True
         _run_timer.start()
 
@@ -59,6 +66,7 @@ def turn_on():
     # Safety: never leave the pump running longer than the hard cap, even if
     # nobody calls /off.
     _arm_auto_off(config.MAX_PUMP_RUN_SECONDS)
+    state_lib.save_state(pump_on=True)
     return jsonify(message="Pump turned on!"), 200
 
 
@@ -67,6 +75,7 @@ def turn_on():
 def turn_off():
     _cancel_auto_off()
     pump_control.off()
+    state_lib.save_state(pump_on=False)
     return jsonify(message="Pump turned off!"), 200
 
 
@@ -81,6 +90,7 @@ def adjust_speed():
         _arm_auto_off(config.MAX_PUMP_RUN_SECONDS)
     else:
         _cancel_auto_off()
+    state_lib.save_state(pump_on=speed_value > 0, speed=speed_value)
     return jsonify(message=f"Pump adjusted to {speed_value}% speed!"), 200
 
 

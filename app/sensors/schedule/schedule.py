@@ -29,6 +29,7 @@ import os
 import subprocess
 
 import config
+from app.lib.persist import write_json_atomic
 
 logger = logging.getLogger(__name__)
 
@@ -120,8 +121,7 @@ def load_schedule():
 
 
 def save_schedule(schedule):
-    with open(config.SCHEDULE_FILE, "w") as fh:
-        json.dump(schedule, fh, indent=2)
+    write_json_atomic(config.SCHEDULE_FILE, schedule)
 
 
 def _hh_mm(value):

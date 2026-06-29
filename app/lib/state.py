@@ -7,6 +7,7 @@ import json
 import logging
 
 import config
+from app.lib.persist import write_json_atomic
 
 logger = logging.getLogger(__name__)
 
@@ -34,8 +35,7 @@ def save_state(**changes):
     state = load_state()
     state.update(changes)
     try:
-        with open(config.STATE_FILE, "w") as fh:
-            json.dump(state, fh, indent=2)
+        write_json_atomic(config.STATE_FILE, state)
     except OSError as exc:
         logger.error("Failed to persist actuator state: %s", exc)
     return state

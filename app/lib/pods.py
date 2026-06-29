@@ -10,6 +10,7 @@ import json
 import os
 
 import config
+from app.lib.persist import write_json_atomic
 
 _CATALOG_PATH = os.path.join(os.path.dirname(__file__), "plants.json")
 
@@ -66,8 +67,7 @@ def load_pods():
 
 def save_pods(pods):
     normalized = normalize(pods)
-    with open(config.PODS_FILE, "w") as fh:
-        json.dump(normalized, fh, indent=2)
+    write_json_atomic(config.PODS_FILE, normalized)
     return normalized
 
 
