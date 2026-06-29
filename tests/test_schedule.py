@@ -14,10 +14,31 @@ class BuildCronLinesTestCase(unittest.TestCase):
         }
         lines = sched.build_cron_lines(s)
         self.assertEqual(len(lines), 2)
-        # Monday -> cron day-of-week 1
-        self.assertIn("30 8 * * 1 /usr/local/bin/light --on --brightness 60", lines[0])
-        self.assertIn("15 22 * * 1 /usr/local/bin/light --off", lines[1])
+        # Monday -> cron day-of-week 1; light.sh takes positional args.
+        self.assertIn("30 8 * * 1 /usr/local/bin/light 60", lines[0])
+        self.assertIn("15 22 * * 1 /usr/local/bin/light off", lines[1])
         self.assertTrue(all(sched.CRON_MARKER in ln for ln in lines))
+
+    def test_light_ramp_emits_ramp_commands(self):
+        s = {
+            "lights": {
+                "enabled": True,
+                "days": {
+                    "mon": [
+                        {
+                            "onTime": "06:00",
+                            "offTime": "22:00",
+                            "brightness": 70,
+                            "rampMinutes": 30,
+                        }
+                    ]
+                },
+            }
+        }
+        lines = sched.build_cron_lines(s)
+        self.assertEqual(len(lines), 2)
+        self.assertIn("0 6 * * 1 /usr/local/bin/light ramp 70 30", lines[0])
+        self.assertIn("0 22 * * 1 /usr/local/bin/light ramp 0 30", lines[1])
 
     def test_multiple_entries_per_day(self):
         s = {

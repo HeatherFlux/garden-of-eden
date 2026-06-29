@@ -133,13 +133,19 @@ def build_cron_lines(schedule):
             dow = DAY_TO_CRON[day]
             for window in lights["days"][day]:
                 brightness = int(window.get("brightness", 70))
+                ramp = int(window.get("rampMinutes", 0) or 0)
                 on_m, on_h = _hh_mm(window.get("onTime", "08:00"))
                 off_m, off_h = _hh_mm(window.get("offTime", "22:00"))
-                lines.append(
-                    f"{on_m} {on_h} * * {dow} {LIGHT_CMD} --on "
-                    f"--brightness {brightness} {CRON_MARKER}"
-                )
-                lines.append(f"{off_m} {off_h} * * {dow} {LIGHT_CMD} --off {CRON_MARKER}")
+                # light.sh takes positional args: `light <brightness|off>`, or
+                # `light ramp <brightness> <minutes>` for a sunrise/sunset fade.
+                if ramp > 0:
+                    on_cmd = f"{LIGHT_CMD} ramp {brightness} {ramp}"
+                    off_cmd = f"{LIGHT_CMD} ramp 0 {ramp}"
+                else:
+                    on_cmd = f"{LIGHT_CMD} {brightness}"
+                    off_cmd = f"{LIGHT_CMD} off"
+                lines.append(f"{on_m} {on_h} * * {dow} {on_cmd} {CRON_MARKER}")
+                lines.append(f"{off_m} {off_h} * * {dow} {off_cmd} {CRON_MARKER}")
 
     pump = schedule["pump"]
     if pump["enabled"]:
