@@ -41,6 +41,14 @@ class DiscoveryTestCase(unittest.TestCase):
             "_upper_camera/config",
             "_lower_camera/config",
             "homeassistant/event/",  # button (#78)
+            "homeassistant/select/",  # grow stage
+            "_grow_stage/config",
+            "_grow_day/config",
+            "_grow_reminder/config",
+            "_grow_start/config",  # start-cycle button
+            "_sched_lights/config",  # lights schedule switch
+            "_sched_pump/config",  # pump schedule switch
+            "_vacation/config",  # vacation mode switch
         ]
         for sub in expected_substrings:
             self.assertTrue(

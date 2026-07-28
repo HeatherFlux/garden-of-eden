@@ -4,6 +4,7 @@ import signal
 import subprocess
 import sys
 import threading
+from datetime import datetime
 from threading import Timer
 
 # import picamera
@@ -25,6 +26,7 @@ from app.sensors.humidity.humidity import humidity_sensor
 from app.sensors.light.routes import light_control
 from app.sensors.pcb_temp.pcb_temp import get_pcb_temperature
 from app.sensors.pump.routes import pump_control
+from app.sensors.schedule import schedule as sched_lib
 from app.sensors.temperature.temperature import temperature_sensor
 from config import (
     BASE_TOPIC,
@@ -518,6 +520,140 @@ def send_discovery_messages(client):
     }
     pub(TEMP_CONFIG_TOPIC, temp_config_payload)
 
+    # --- Grow cycle: manage the same things the web UI exposes, from HA ---
+    pub(
+        f"homeassistant/select/gardyn/{IDENTIFIER}_grow_stage/config",
+        {
+            "name": "Grow Stage",
+            "unique_id": IDENTIFIER + "_grow_stage",
+            "state_topic": BASE_TOPIC + "/grow/stage",
+            "command_topic": BASE_TOPIC + "/grow/stage/set",
+            "options": grow_lib.STAGES,
+            "icon": "mdi:sprout",
+            "device": device_info,
+        },
+    )
+    pub(
+        f"homeassistant/sensor/gardyn/{IDENTIFIER}_grow_day/config",
+        {
+            "name": "Grow Day",
+            "unique_id": IDENTIFIER + "_grow_day",
+            "state_topic": BASE_TOPIC + "/grow/day",
+            "unit_of_measurement": "d",
+            "icon": "mdi:calendar-clock",
+            "device": device_info,
+        },
+    )
+    pub(
+        f"homeassistant/sensor/gardyn/{IDENTIFIER}_grow_reminder/config",
+        {
+            "name": "Grow Reminder",
+            "unique_id": IDENTIFIER + "_grow_reminder",
+            "state_topic": BASE_TOPIC + "/grow/reminder",
+            "icon": "mdi:bell-alert",
+            "device": device_info,
+        },
+    )
+    pub(
+        f"homeassistant/button/gardyn/{IDENTIFIER}_grow_start/config",
+        {
+            "name": "Start New Grow Cycle",
+            "unique_id": IDENTIFIER + "_grow_start",
+            "command_topic": BASE_TOPIC + "/grow/start/set",
+            "icon": "mdi:restart",
+            "device": device_info,
+        },
+    )
+
+    # --- Schedule: top-level toggles (per-day windows stay in the web UI) ---
+    pub(
+        f"homeassistant/switch/gardyn/{IDENTIFIER}_sched_lights/config",
+        {
+            "name": "Lights Schedule",
+            "unique_id": IDENTIFIER + "_sched_lights",
+            "state_topic": BASE_TOPIC + "/schedule/lights/enabled",
+            "command_topic": BASE_TOPIC + "/schedule/lights/enabled/set",
+            "payload_on": "ON",
+            "payload_off": "OFF",
+            "icon": "mdi:calendar-check",
+            "device": device_info,
+        },
+    )
+    pub(
+        f"homeassistant/switch/gardyn/{IDENTIFIER}_sched_pump/config",
+        {
+            "name": "Pump Schedule",
+            "unique_id": IDENTIFIER + "_sched_pump",
+            "state_topic": BASE_TOPIC + "/schedule/pump/enabled",
+            "command_topic": BASE_TOPIC + "/schedule/pump/enabled/set",
+            "payload_on": "ON",
+            "payload_off": "OFF",
+            "icon": "mdi:calendar-check",
+            "device": device_info,
+        },
+    )
+    pub(
+        f"homeassistant/switch/gardyn/{IDENTIFIER}_vacation/config",
+        {
+            "name": "Vacation Mode",
+            "unique_id": IDENTIFIER + "_vacation",
+            "state_topic": BASE_TOPIC + "/schedule/vacation/enabled",
+            "command_topic": BASE_TOPIC + "/schedule/vacation/enabled/set",
+            "payload_on": "ON",
+            "payload_off": "OFF",
+            "icon": "mdi:airplane",
+            "device": device_info,
+        },
+    )
+
+
+def publish_grow_state(client):
+    """Publish current grow stage + day (retained) so HA reflects real state."""
+    try:
+        state = grow_lib.load_state()
+        client.publish(BASE_TOPIC + "/grow/stage", state.get("stage", ""), retain=True)
+        day = grow_lib._days_since(state.get("started"), datetime.now())
+        client.publish(BASE_TOPIC + "/grow/day", str(day), retain=True)
+        due = grow_lib.due_reminders(state)
+        client.publish(BASE_TOPIC + "/grow/reminder", due[-1] if due else "none", retain=True)
+    except Exception:
+        logger.exception("Error publishing grow state")
+
+
+def publish_schedule_state(client):
+    """Publish schedule enable toggles (lights/pump/vacation) retained for HA."""
+    try:
+        schedule = sched_lib.normalize_schedule(sched_lib.load_schedule())
+        client.publish(
+            BASE_TOPIC + "/schedule/lights/enabled",
+            "ON" if schedule["lights"]["enabled"] else "OFF",
+            retain=True,
+        )
+        client.publish(
+            BASE_TOPIC + "/schedule/pump/enabled",
+            "ON" if schedule["pump"]["enabled"] else "OFF",
+            retain=True,
+        )
+        client.publish(
+            BASE_TOPIC + "/schedule/vacation/enabled",
+            "ON" if schedule["vacation"]["enabled"] else "OFF",
+            retain=True,
+        )
+    except Exception:
+        logger.exception("Error publishing schedule state")
+
+
+def _set_schedule_flag(client, section, enabled):
+    """Flip a top-level schedule enable flag, rewrite crontab, and republish state."""
+    schedule = sched_lib.normalize_schedule(sched_lib.load_schedule())
+    schedule[section]["enabled"] = enabled
+    try:
+        sched_lib.apply_schedule(schedule)
+    except (FileNotFoundError, subprocess.CalledProcessError) as exc:
+        # crontab missing/unavailable (e.g. off-Pi) — schedule is still saved.
+        logger.warning("Schedule saved but crontab not applied: %s", exc)
+    publish_schedule_state(client)
+
 
 def on_connect(client, userdata, flags, rc, properties=None):
     logger.info(f"Connected with result code {rc}")
@@ -527,6 +663,8 @@ def on_connect(client, userdata, flags, rc, properties=None):
     client.publish(AVAILABILITY_TOPIC, "online", retain=True)
     send_discovery_messages(client)
     publish_water_low_mode(client)
+    publish_grow_state(client)
+    publish_schedule_state(client)
 
 
 def on_message(client, userdata, msg):
@@ -620,6 +758,29 @@ def on_message(client, userdata, msg):
             humidity = humidity_sensor.read()
             client.publish(BASE_TOPIC + "/humidity", f"{humidity:.2f}")
 
+        # === Grow cycle (HA control) ===
+        elif topic_suffix == "grow/stage/set":
+            grow_state = grow_lib.load_state()
+            grow_lib.set_stage(grow_state, payload)
+            grow_lib.save_state(grow_state)
+            publish_grow_state(client)
+
+        elif topic_suffix == "grow/start/set":
+            grow_lib.start_cycle()
+            publish_grow_state(client)
+
+        # === Schedule toggles (HA control; rewrites crontab) ===
+        elif topic_suffix == "schedule/lights/enabled/set":
+            _set_schedule_flag(client, "lights", payload.upper() == "ON")
+
+        elif topic_suffix == "schedule/pump/enabled/set":
+            _set_schedule_flag(client, "pump", payload.upper() == "ON")
+
+        elif topic_suffix == "schedule/vacation/enabled/set":
+            _set_schedule_flag(client, "vacation", payload.upper() == "ON")
+
+    except ValueError as e:
+        logger.warning(f"Rejected message on topic {msg.topic}: {e}")
     except Exception as e:
         logger.exception(f"Error handling message on topic {msg.topic}: {e}")
 
@@ -770,14 +931,17 @@ def publish_grow_reminders(client):
         try:
             grow_state = grow_lib.load_state()
             client.publish(BASE_TOPIC + "/grow/stage", grow_state.get("stage", ""), retain=True)
+            day = grow_lib._days_since(grow_state.get("started"), datetime.now())
+            client.publish(BASE_TOPIC + "/grow/day", str(day), retain=True)
             due = grow_lib.due_reminders(grow_state)
             # Dedicated "add plant food" alarm for Home Assistant.
             client.publish(
                 BASE_TOPIC + "/grow/food", "ON" if "nutrient" in due else "OFF", retain=True
             )
+            # Latest due reminder as a retained sensor value (or "none").
+            client.publish(BASE_TOPIC + "/grow/reminder", due[-1] if due else "none", retain=True)
             for reminder in due:
-                client.publish(BASE_TOPIC + "/grow/reminder", reminder)
-                logger.info("Published grow reminder: %s", reminder)
+                logger.info("Grow reminder due: %s", reminder)
         except Exception:
             logger.exception("Error publishing grow reminders")
         sleep(int(publish_frequency))

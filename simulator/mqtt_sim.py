@@ -26,10 +26,19 @@ _state = os.path.join(os.path.dirname(__file__), ".sim")
 os.makedirs(_state, exist_ok=True)
 os.environ.setdefault("STATE_FILE", os.path.join(_state, "state.json"))
 os.environ.setdefault("GROW_STATE_FILE", os.path.join(_state, "grow.json"))
+os.environ.setdefault("SCHEDULE_FILE", os.path.join(_state, "schedule.json"))
 
 from simulator import fake_hardware  # noqa: E402
 
 fake_hardware.install()
+
+# Sandbox the crontab writer so schedule changes from HA never touch the host's
+# real crontab (mqtt.py's schedule toggles call apply_schedule). Mirrors the
+# guard serve.py applies to the Flask /schedule route.
+from app.sensors.schedule import schedule as _schedule  # noqa: E402
+
+_schedule._read_crontab = lambda: []
+_schedule._write_crontab = lambda lines: None
 
 if __name__ == "__main__":
     print("Garden of Eden MQTT simulator -> broker", os.environ["MQTT_BROKER"])

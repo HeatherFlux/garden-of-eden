@@ -34,6 +34,32 @@ views:
           - entity: binary_sensor.gardyn_03_water_low
             name: Water Low
 
+      - type: entities
+        title: Grow Cycle
+        entities:
+          - entity: select.gardyn_03_grow_stage
+            name: Stage
+          - entity: sensor.gardyn_03_grow_day
+            name: Day
+          - entity: sensor.gardyn_03_grow_reminder
+            name: Reminder
+          - entity: binary_sensor.gardyn_03_food
+            name: Add plant food
+          - entity: button.gardyn_03_grow_start
+            name: Start new cycle
+
+      - type: entities
+        title: Schedule
+        # Enable/disable the light + pump schedules and Vacation mode. The detailed
+        # per-day windows are edited in the built-in web UI (http://gardyn.local:5000/).
+        entities:
+          - entity: switch.gardyn_03_sched_lights
+            name: Lights schedule
+          - entity: switch.gardyn_03_sched_pump
+            name: Pump schedule
+          - entity: switch.gardyn_03_vacation
+            name: Vacation mode
+
       - type: picture-entity
         title: Upper Camera
         entity: image.gardyn_03_upper_camera
