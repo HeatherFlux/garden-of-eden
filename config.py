@@ -118,6 +118,10 @@ OVER_TEMP_HYSTERESIS = _get_float("OVER_TEMP_HYSTERESIS", 34)
 # ---------------------------------------------------------------------------
 WATER_LOW_CM = _get_float("WATER_LOW_CM", 0) or None
 
+# How often (seconds) the MQTT service re-reads the tank and refreshes the
+# low-water alert. Kept short so a transient false alarm self-clears quickly.
+WATER_CHECK_SECONDS = _get_int("WATER_CHECK_SECONDS", 180)
+
 # Tank geometry for the cm->gallons readout: distance (cm) from the sensor to the
 # water surface when the tank is full vs empty, and the tank capacity in gallons
 # (Gardyn Home ~5 gal, Studio ~4 gal). Calibrate FULL/EMPTY to your unit.
