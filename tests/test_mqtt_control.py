@@ -86,6 +86,41 @@ class MqttControlTestCase(unittest.TestCase):
         self.assertEqual(sched["lights"]["days"]["mon"][0]["onTime"], "23:00")
         self.assertEqual(sched["pump"]["days"]["mon"][0]["time"], "02:00")
 
+    # --- everyday schedule setters (write one window/run to all 7 days) ---
+    def test_set_everyday_light_window(self):
+        self.send("schedule/lights/on/set", "23:00:00")
+        self.send("schedule/lights/off/set", "07:00:00")
+        self.send("schedule/lights/brightness/set", "80")
+
+        days = self.mqtt.sched_lib.load_schedule()["lights"]["days"]
+        for day in self.mqtt.sched_lib.DAYS:
+            self.assertEqual(days[day][0]["onTime"], "23:00")
+            self.assertEqual(days[day][0]["offTime"], "07:00")
+            self.assertEqual(days[day][0]["brightness"], 80)
+        self.assertIn("23:00:00", self.published_for("schedule/lights/on"))
+        self.assertIn("80", self.published_for("schedule/lights/brightness"))
+
+    def test_set_everyday_pump_run(self):
+        self.send("schedule/pump/time/set", "02:30:00")
+        self.send("schedule/pump/duration/set", "4")
+
+        days = self.mqtt.sched_lib.load_schedule()["pump"]["days"]
+        for day in self.mqtt.sched_lib.DAYS:
+            self.assertEqual(days[day][0]["time"], "02:30")
+            self.assertEqual(days[day][0]["duration"], 4)
+
+    def test_pump_duration_clamped_to_safety_cap(self):
+        self.send("schedule/pump/duration/set", "99")  # above the 5-min cap
+        run = self.mqtt.sched_lib.load_schedule()["pump"]["days"]["mon"][0]
+        self.assertEqual(run["duration"], 5)
+
+    def test_setting_one_light_field_preserves_others(self):
+        self.send("schedule/lights/on/set", "23:00:00")
+        self.send("schedule/lights/brightness/set", "60")  # must keep onTime 23:00
+        mon = self.mqtt.sched_lib.load_schedule()["lights"]["days"]["mon"][0]
+        self.assertEqual(mon["onTime"], "23:00")
+        self.assertEqual(mon["brightness"], 60)
+
     # --- grow cycle ---
     def test_grow_stage_set(self):
         self.send("grow/stage/set", "thinning")

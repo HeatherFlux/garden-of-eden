@@ -50,13 +50,24 @@ views:
 
       - type: entities
         title: Schedule
-        # Enable/disable the light + pump schedules and Vacation mode. The detailed
-        # per-day windows are edited in the built-in web UI (http://gardyn.local:5000/).
+        # Set one daily schedule from HA: the times/brightness below are applied to
+        # all 7 days. For different windows per day (or multiple windows/runs a day)
+        # use the built-in web UI heatmap (http://gardyn.local:5000/).
         entities:
           - entity: switch.gardyn_03_sched_lights
             name: Lights schedule
+          - entity: time.gardyn_03_sched_lights_on
+            name: Lights on
+          - entity: time.gardyn_03_sched_lights_off
+            name: Lights off
+          - entity: number.gardyn_03_sched_lights_brightness
+            name: Brightness
           - entity: switch.gardyn_03_sched_pump
             name: Pump schedule
+          - entity: time.gardyn_03_sched_pump_time
+            name: Pump run at
+          - entity: number.gardyn_03_sched_pump_duration
+            name: Pump minutes
           - entity: switch.gardyn_03_vacation
             name: Vacation mode
 

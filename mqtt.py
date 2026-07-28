@@ -606,6 +606,55 @@ def send_discovery_messages(client):
         },
     )
 
+    # --- Everyday schedule: set one daily window/run from HA (applied to all 7
+    # days). Per-day / multi-window editing still lives in the web UI heatmap. ---
+    everyday = [
+        (
+            "time",
+            "sched_lights_on",
+            "Lights On Time",
+            "schedule/lights/on",
+            "mdi:weather-sunny",
+            {},
+        ),
+        (
+            "time",
+            "sched_lights_off",
+            "Lights Off Time",
+            "schedule/lights/off",
+            "mdi:weather-night",
+            {},
+        ),
+        (
+            "number",
+            "sched_lights_brightness",
+            "Schedule Brightness",
+            "schedule/lights/brightness",
+            "mdi:brightness-6",
+            {"min": 0, "max": 100, "step": 1, "unit_of_measurement": "%"},
+        ),
+        ("time", "sched_pump_time", "Pump Run Time", "schedule/pump/time", "mdi:water-pump", {}),
+        (
+            "number",
+            "sched_pump_duration",
+            "Pump Run Duration",
+            "schedule/pump/duration",
+            "mdi:timer-sand",
+            {"min": 1, "max": 5, "step": 1, "unit_of_measurement": "min"},
+        ),
+    ]
+    for component, obj, name, topic, icon, extra in everyday:
+        payload = {
+            "name": name,
+            "unique_id": IDENTIFIER + "_" + obj,
+            "state_topic": BASE_TOPIC + "/" + topic,
+            "command_topic": BASE_TOPIC + "/" + topic + "/set",
+            "icon": icon,
+            "device": device_info,
+        }
+        payload.update(extra)
+        pub(f"homeassistant/{component}/gardyn/{IDENTIFIER}_{obj}/config", payload)
+
 
 def publish_grow_state(client):
     """Publish current grow stage + day (retained) so HA reflects real state."""
@@ -620,8 +669,36 @@ def publish_grow_state(client):
         logger.exception("Error publishing grow state")
 
 
+def _time_to_ha(hhmm):
+    """'HH:MM' (schedule) -> 'HH:MM:SS' (HA time entity)."""
+    return (hhmm or "00:00")[:5] + ":00"
+
+
+def _time_from_ha(value):
+    """'HH:MM:SS' (HA) -> 'HH:MM' (schedule); tolerates already-short values."""
+    return value.strip()[:5]
+
+
+def _everyday_light(schedule):
+    """The representative daily light window (first day that has one, else default)."""
+    for day in sched_lib.DAYS:
+        windows = schedule["lights"]["days"].get(day) or []
+        if windows:
+            return dict(windows[0])
+    return {"onTime": "06:00", "offTime": "22:00", "brightness": 70, "rampMinutes": 0}
+
+
+def _everyday_pump(schedule):
+    """The representative daily pump run (first day that has one, else default)."""
+    for day in sched_lib.DAYS:
+        runs = schedule["pump"]["days"].get(day) or []
+        if runs:
+            return dict(runs[0])
+    return {"time": "12:00", "duration": 5}
+
+
 def publish_schedule_state(client):
-    """Publish schedule enable toggles (lights/pump/vacation) retained for HA."""
+    """Publish schedule toggles + the everyday window/run, retained for HA."""
     try:
         schedule = sched_lib.normalize_schedule(sched_lib.load_schedule())
         client.publish(
@@ -639,20 +716,62 @@ def publish_schedule_state(client):
             "ON" if schedule["vacation"]["enabled"] else "OFF",
             retain=True,
         )
+        light = _everyday_light(schedule)
+        client.publish(
+            BASE_TOPIC + "/schedule/lights/on", _time_to_ha(light["onTime"]), retain=True
+        )
+        client.publish(
+            BASE_TOPIC + "/schedule/lights/off", _time_to_ha(light["offTime"]), retain=True
+        )
+        client.publish(
+            BASE_TOPIC + "/schedule/lights/brightness",
+            str(int(light.get("brightness", 70))),
+            retain=True,
+        )
+        pump = _everyday_pump(schedule)
+        client.publish(BASE_TOPIC + "/schedule/pump/time", _time_to_ha(pump["time"]), retain=True)
+        client.publish(
+            BASE_TOPIC + "/schedule/pump/duration", str(int(pump.get("duration", 5))), retain=True
+        )
     except Exception:
         logger.exception("Error publishing schedule state")
 
 
-def _set_schedule_flag(client, section, enabled):
-    """Flip a top-level schedule enable flag, rewrite crontab, and republish state."""
-    schedule = sched_lib.normalize_schedule(sched_lib.load_schedule())
-    schedule[section]["enabled"] = enabled
+def _apply_schedule(client, schedule):
+    """Persist + rewrite crontab (tolerating a missing crontab), then republish."""
     try:
         sched_lib.apply_schedule(schedule)
     except (FileNotFoundError, subprocess.CalledProcessError) as exc:
         # crontab missing/unavailable (e.g. off-Pi) — schedule is still saved.
         logger.warning("Schedule saved but crontab not applied: %s", exc)
     publish_schedule_state(client)
+
+
+def _set_schedule_flag(client, section, enabled):
+    """Flip a top-level schedule enable flag, rewrite crontab, and republish state."""
+    schedule = sched_lib.normalize_schedule(sched_lib.load_schedule())
+    schedule[section]["enabled"] = enabled
+    _apply_schedule(client, schedule)
+
+
+def _set_everyday_light(client, **changes):
+    """Update the everyday light window (one field) and write it to all 7 days."""
+    schedule = sched_lib.normalize_schedule(sched_lib.load_schedule())
+    window = _everyday_light(schedule)
+    window.update(changes)
+    for day in sched_lib.DAYS:
+        schedule["lights"]["days"][day] = [dict(window)]
+    _apply_schedule(client, schedule)
+
+
+def _set_everyday_pump(client, **changes):
+    """Update the everyday pump run (one field) and write it to all 7 days."""
+    schedule = sched_lib.normalize_schedule(sched_lib.load_schedule())
+    run = _everyday_pump(schedule)
+    run.update(changes)
+    for day in sched_lib.DAYS:
+        schedule["pump"]["days"][day] = [dict(run)]
+    _apply_schedule(client, schedule)
 
 
 def on_connect(client, userdata, flags, rc, properties=None):
@@ -778,6 +897,22 @@ def on_message(client, userdata, msg):
 
         elif topic_suffix == "schedule/vacation/enabled/set":
             _set_schedule_flag(client, "vacation", payload.upper() == "ON")
+
+        # === Everyday schedule setters (write one window/run to all 7 days) ===
+        elif topic_suffix == "schedule/lights/on/set":
+            _set_everyday_light(client, onTime=_time_from_ha(payload))
+
+        elif topic_suffix == "schedule/lights/off/set":
+            _set_everyday_light(client, offTime=_time_from_ha(payload))
+
+        elif topic_suffix == "schedule/lights/brightness/set" and payload.isdigit():
+            _set_everyday_light(client, brightness=max(0, min(100, int(payload))))
+
+        elif topic_suffix == "schedule/pump/time/set":
+            _set_everyday_pump(client, time=_time_from_ha(payload))
+
+        elif topic_suffix == "schedule/pump/duration/set" and payload.isdigit():
+            _set_everyday_pump(client, duration=max(1, min(5, int(payload))))
 
     except ValueError as e:
         logger.warning(f"Rejected message on topic {msg.topic}: {e}")

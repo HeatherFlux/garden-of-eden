@@ -49,6 +49,12 @@ class DiscoveryTestCase(unittest.TestCase):
             "_sched_lights/config",  # lights schedule switch
             "_sched_pump/config",  # pump schedule switch
             "_vacation/config",  # vacation mode switch
+            "homeassistant/time/",  # everyday on/off/pump times
+            "_sched_lights_on/config",
+            "_sched_lights_off/config",
+            "_sched_lights_brightness/config",
+            "_sched_pump_time/config",
+            "_sched_pump_duration/config",
         ]
         for sub in expected_substrings:
             self.assertTrue(
