@@ -2,8 +2,8 @@
 
 # Script to control Gardyn water pump
 # Usage: water <seconds|on|off>
-# "on" defaults to 300 seconds (5 minutes), valid time range is 1 to 300 seconds
-# (5 minutes) -- a hard safety cap; out-of-range input falls back to the default.
+# "on" defaults to 300 seconds (5 minutes), valid time range is 1 to 900 seconds
+# (15 minutes) -- a hard safety cap; out-of-range input falls back to the default.
 
 # -e exit immediately
 # -u undefined variables trigger error
@@ -13,7 +13,7 @@ set -euo pipefail
 # Constants
 readonly TIME_DEFAULT=300    # 5 minutes in seconds
 readonly TIME_MIN=1          # 1 second
-readonly TIME_MAX=300        # 5 minutes in seconds (hard safety cap)
+readonly TIME_MAX=900        # 15 minutes in seconds (hard safety cap)
 readonly SPEED=50
 readonly WATER_BY_DEFAULT=true  # Whether to default to TIME_DEFAULT on invalid input
 

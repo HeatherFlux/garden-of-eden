@@ -98,8 +98,9 @@ DEFAULT_PUMP_SPEED = _get_int("DEFAULT_PUMP_SPEED", 100)
 
 # Hard safety cap: the pump may never run longer than this in one go, no matter
 # what a schedule, API call, or CLI invocation requests. Enforced in the pump
-# routes, the schedule cron compiler, and bin/water.sh. 300s = 5 minutes.
-MAX_PUMP_RUN_SECONDS = _get_int("MAX_PUMP_RUN_SECONDS", 300)
+# routes, the schedule cron compiler, and bin/water.sh. 900s = 15 minutes, which
+# matches the longest cycle the stock Gardyn app runs; lower it via env to tighten.
+MAX_PUMP_RUN_SECONDS = _get_int("MAX_PUMP_RUN_SECONDS", 900)
 
 # ---------------------------------------------------------------------------
 # I2C device addresses
