@@ -158,6 +158,8 @@ GARDEN_API_KEY = os.getenv("GARDEN_API_KEY", "")
 # ---------------------------------------------------------------------------
 STATE_FILE = os.path.expanduser(os.getenv("STATE_FILE", "~/.garden_state.json"))
 SCHEDULE_FILE = os.path.expanduser(os.getenv("SCHEDULE_FILE", "~/.garden_schedule.json"))
+# Custom schedule presets saved from the web UI / REST (built-ins live in code).
+PRESETS_FILE = os.path.expanduser(os.getenv("PRESETS_FILE", "~/.garden_presets.json"))
 
 # Per-pod plant tracking (name + shape code). POD_COUNT pods (Gardyn Home = 30).
 POD_COUNT = _get_int("POD_COUNT", 30)

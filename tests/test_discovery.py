@@ -55,6 +55,7 @@ class DiscoveryTestCase(unittest.TestCase):
             "_sched_lights_brightness/config",
             "_sched_pump_time/config",
             "_sched_pump_duration/config",
+            "_sched_preset/config",  # schedule preset select
         ]
         for sub in expected_substrings:
             self.assertTrue(
@@ -75,6 +76,16 @@ class DiscoveryTestCase(unittest.TestCase):
         self.mqtt.send_discovery_messages(client)
         button = [json.loads(p) for t, p in client.published if "/event/" in t][0]
         self.assertEqual(set(button["event_types"]), {"single", "double", "long"})
+
+    def test_preset_select_lists_builtins_and_custom(self):
+        client = FakeClient()
+        self.mqtt.send_discovery_messages(client)
+        payload = next(
+            json.loads(p) for t, p in client.published if t.endswith("_sched_preset/config")
+        )
+        self.assertEqual(payload["command_topic"], self.mqtt.BASE_TOPIC + "/schedule/preset/set")
+        for name in ("germinate", "seedling", "vegetative", "flower", "night", "custom"):
+            self.assertIn(name, payload["options"])
 
 
 if __name__ == "__main__":

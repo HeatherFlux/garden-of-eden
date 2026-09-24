@@ -50,10 +50,14 @@ views:
 
       - type: entities
         title: Schedule
-        # Set one daily schedule from HA: the times/brightness below are applied to
+        # Pick a preset (built-in stage presets or ones you saved in the web UI), or
+        # set one daily schedule from HA: the times/brightness below are applied to
         # all 7 days. For different windows per day (or multiple windows/runs a day)
-        # use the built-in web UI heatmap (http://gardyn.local:5000/).
+        # use the built-in web UI heatmap (http://gardyn.local:5000/). The preset
+        # select reads "custom" whenever the live week matches no preset.
         entities:
+          - entity: select.gardyn_03_sched_preset
+            name: Preset
           - entity: switch.gardyn_03_sched_lights
             name: Lights schedule
           - entity: time.gardyn_03_sched_lights_on

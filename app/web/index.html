@@ -107,7 +107,7 @@
     button.ghost { background:var(--surface); color:var(--green-ink); border:1px solid var(--line-2);
       border-radius:11px; padding:8px 14px; font-size:.82rem; font-weight:600; cursor:pointer; }
     button.ghost:hover { border-color:var(--green); color:var(--green); }
-    input[type=time],input[type=number],input[type=password],select{
+    input[type=time],input[type=number],input[type=password],input[type=text],select{
       font:inherit; font-size:.85rem; padding:8px 10px; border:1px solid var(--line-2); border-radius:10px;
       background:#fff; color:var(--ink); }
     input:focus,select:focus{ outline:none; border-color:var(--green-2); box-shadow:0 0 0 3px rgba(63,155,110,.15); }
@@ -149,6 +149,11 @@
     .mode { border:1px solid var(--line); background:var(--surface-2); color:var(--ink); border-radius:999px;
       padding:8px 14px; font-size:.82rem; font-weight:600; cursor:pointer; transition:.15s; }
     .mode:hover { border-color:var(--green-2); color:var(--green); transform:translateY(-1px); }
+    .mode.active { background:var(--green); border-color:var(--green); color:#fff; }
+    .mode-group { display:inline-flex; }
+    .mode-group .mode { border-radius:999px 0 0 999px; }
+    .mode-group .mode.del { border-radius:0 999px 999px 0; border-left:0; padding:8px 10px; color:var(--muted); }
+    .mode-group .mode.del:hover { color:#c0392b; border-color:#c0392b; }
     /* Week heatmap scheduler */
     .heatmap { display:grid; grid-template-columns:30px repeat(24,1fr); gap:2px; align-items:center; }
     .heatmap .hlabel { font-size:.6rem; color:var(--faint); text-align:right; padding-right:4px; }
@@ -363,20 +368,13 @@
 
     <div class="card">
       <h2>Schedule</h2>
-      <div class="modes">
-        <button class="mode" onclick="applyPreset('germinate')">Germinate</button>
-        <button class="mode" onclick="applyPreset('seedling')">Seedling</button>
-        <button class="mode" onclick="applyPreset('vegetative')">Vegetative</button>
-        <button class="mode" onclick="applyPreset('flower')">Flower</button>
-        <button class="mode" onclick="applyPreset('night')">Night (while you sleep)</button>
-        <button class="mode" onclick="applyPreset('vacation')">Vacation</button>
-      </div>
+      <div class="modes" id="presets"></div>
 
       <div class="heatmap" id="heatmap"></div>
       <div class="hm-legend">
         <span><i class="sw light"></i>light %</span>
         <span><i class="sw pump"></i>pump run</span>
-        <span class="muted" style="margin-left:auto">tap a preset, then Save</span>
+        <span class="muted" style="margin-left:auto">tap a preset, then Save · edit the week below and save it as your own</span>
       </div>
 
       <details class="customize">
@@ -393,8 +391,14 @@
         <div class="sched-days" id="sch-pump-days"></div>
       </details>
 
+      <div class="row" style="margin-top:14px">
+        <input type="text" id="preset-name" placeholder="name this week (e.g. tomatoes)" maxlength="40" style="width:210px" onkeydown="if(event.key==='Enter')savePreset()">
+        <button class="ghost" onclick="savePreset()">Save week as preset</button>
+        <span class="muted">stores the editor above as a preset you can tap later (also picks up in Home Assistant)</span>
+      </div>
+
       <div class="row" style="margin-top:18px">
-        <label class="switch"><input type="checkbox" id="sch-vacation-en"><span class="track"></span>Vacation mode</label>
+        <label class="switch"><input type="checkbox" id="sch-vacation-en" onchange="renderPresets()"><span class="track"></span>Vacation mode</label>
         <label>until <input type="date" id="sch-vacation-until"></label>
         <span class="muted">reduced light/water (10–16h @ 50%, one short pump) until this date</span>
       </div>
@@ -439,6 +443,13 @@
         let d = {}; try { d = await r.json(); } catch {}
         conn(r.ok); toast(d.message || d.error || (r.ok ? "ok" : "error " + r.status), !r.ok); return d;
       } catch (e) { conn(false); toast(e.name === "AbortError" ? "request timed out" : "error: " + e.message, true); }
+    }
+    async function apiDelete(path) {
+      try {
+        const r = await fetchT(path, { method: "DELETE", headers: headers() });
+        let d = {}; try { d = await r.json(); } catch {}
+        conn(r.ok); toast(d.error || (r.ok ? "deleted" : "error " + r.status), !r.ok); return r.ok;
+      } catch (e) { conn(false); toast("error: " + e.message, true); return false; }
     }
     // Lightweight reachability probe for the connection dot.
     async function ping() {
@@ -579,16 +590,36 @@
       });
     }
 
-    // ---- One-click stage presets (fill the editor; user reviews & Saves) ----
-    const PRESETS = {
-      germinate:  { light: { onTime: "06:00", offTime: "22:00", brightness: 30, rampMinutes: 15 }, pump: [{ time: "06:00", duration: 3 }, { time: "12:00", duration: 3 }, { time: "18:00", duration: 3 }] },
-      seedling:   { light: { onTime: "06:00", offTime: "22:00", brightness: 50, rampMinutes: 15 }, pump: [{ time: "08:00", duration: 4 }, { time: "16:00", duration: 4 }, { time: "00:00", duration: 4 }] },
-      vegetative: { light: { onTime: "06:00", offTime: "22:00", brightness: 80, rampMinutes: 20 }, pump: [{ time: "08:00", duration: 5 }, { time: "16:00", duration: 5 }, { time: "00:00", duration: 5 }] },
-      flower:     { light: { onTime: "07:00", offTime: "19:00", brightness: 100, rampMinutes: 20 }, pump: [{ time: "08:00", duration: 5 }, { time: "14:00", duration: 5 }, { time: "20:00", duration: 5 }] },
-      // Run the garden overnight: lights on 11pm–7am (daytime sun does the rest),
-      // watering while you sleep. Window crosses midnight (the heatmap handles it).
-      night:      { light: { onTime: "23:00", offTime: "07:00", brightness: 80, rampMinutes: 20 }, pump: [{ time: "23:15", duration: 5 }, { time: "02:00", duration: 5 }, { time: "05:00", duration: 5 }] },
-    };
+    // ---- Presets: built-in stage presets + custom ones, served by /schedule/presets.
+    // Tapping one fills the editor (user reviews & Saves); the highlighted chip is
+    // whichever preset the saved schedule currently matches. ----
+    let presetList = [], activePreset = null;
+    const PRESET_LABELS = { night: "Night (while you sleep)" };
+    const presetLabel = p => p.builtin ? (PRESET_LABELS[p.name] || p.name[0].toUpperCase() + p.name.slice(1)) : p.name;
+    async function loadPresets() {
+      try {
+        const r = await get("/schedule/presets");
+        presetList = r.presets || []; activePreset = r.active || null;
+      } catch { presetList = []; activePreset = null; }
+      renderPresets();
+    }
+    function renderPresets() {
+      const box = $("presets"); if (!box) return; box.innerHTML = "";
+      const chip = (label, onclick, cls) => {
+        const b = document.createElement("button"); b.className = "mode" + (cls ? " " + cls : "");
+        b.textContent = label; b.onclick = onclick; return b;
+      };
+      presetList.forEach(p => {
+        const active = activePreset && p.name.toLowerCase() === activePreset.toLowerCase();
+        const main = chip(presetLabel(p), () => applyPreset(p.name), active ? "active" : "");
+        main.title = p.builtin ? "built-in preset" : "custom preset";
+        if (p.builtin) { box.appendChild(main); return; }
+        const group = document.createElement("span"); group.className = "mode-group";
+        const del = chip("✕", () => deletePreset(p.name), "del"); del.title = "delete preset " + p.name;
+        group.append(main, del); box.appendChild(group);
+      });
+      box.appendChild(chip("Vacation", () => applyPreset("vacation"), $("sch-vacation-en") && $("sch-vacation-en").checked ? "active" : ""));
+    }
     function applyPreset(name) {
       if (name === "vacation") {
         $("sch-vacation-en").checked = true;
@@ -599,12 +630,22 @@
         toast("Vacation mode set — adjust the date & Save");
         return;
       }
-      const p = PRESETS[name]; if (!p) return;
-      SCH_DAYS.forEach(d => { lightDays[d] = [{ ...p.light }]; pumpDays[d] = p.pump.map(r => ({ ...r })); });
+      const p = presetList.find(x => x.name.toLowerCase() === name.toLowerCase()); if (!p) return;
+      lightDays = mergeDays(p.lights.days); pumpDays = mergeDays(p.pump.days);
       $("sch-lights-en").checked = true; $("sch-pump-en").checked = true;
       if (name === "germinate") post("/grow/start").then(loadGrow);
       renderSchedule();
-      toast(name + " preset loaded — review & Save");
+      toast(presetLabel(p) + " preset loaded — review & Save");
+    }
+    // Save the week in the editor as a named preset (built-in names are refused by the API).
+    async function savePreset() {
+      const name = $("preset-name").value.trim();
+      if (!name) { toast("give the preset a name", true); $("preset-name").focus(); return; }
+      const r = await post("/schedule/presets", { name, lights: { days: lightDays }, pump: { days: pumpDays } });
+      if (r && !r.error) { $("preset-name").value = ""; toast("saved preset " + r.name); loadPresets(); }
+    }
+    async function deletePreset(name) {
+      if (await apiDelete("/schedule/presets/" + encodeURIComponent(name))) loadPresets();
     }
 
     // ---- Reminder alert banners ----
@@ -738,15 +779,16 @@
         $("sch-vacation-until").value = v.until || "";
         lightDays = mergeDays(l.days);
         pumpDays = mergeDays(p.days);
-        renderSchedule();
+        renderSchedule(); renderPresets();
       } catch {}
     }
-    function saveSchedule() {
-      post("/schedule", {
+    async function saveSchedule() {
+      await post("/schedule", {
         lights: { enabled: $("sch-lights-en").checked, days: lightDays },
         pump: { enabled: $("sch-pump-en").checked, days: pumpDays },
         vacation: { enabled: $("sch-vacation-en").checked, until: $("sch-vacation-until").value || null },
       });
+      loadPresets();
     }
 
     const resolveTheme = pref => pref === "auto" ? (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light") : pref;
@@ -785,7 +827,7 @@
     $("theme-btn").textContent = document.documentElement.dataset.theme === "dark" ? "🌙" : "☀️";
     $("set-theme").value = localStorage.getItem("theme") || "dark";
     $("set-caminterval").value = camInterval;
-    loadSystem(); refresh(); loadGrow(); loadSchedule(); loadPods(); loadCams(); loadTimelapses(); syncToggles(); ping();
+    loadSystem(); refresh(); loadGrow(); loadSchedule(); loadPresets(); loadPods(); loadCams(); loadTimelapses(); syncToggles(); ping();
     setInterval(refresh, 30000);
     setInterval(ping, 10000);
   </script>

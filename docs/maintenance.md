@@ -45,7 +45,8 @@ curl localhost:5000/temperature      # 503 means the sensor is unreachable
 Actuator/grow/schedule state is stored in your home dir:
 
 ```bash
-rm ~/.garden_state.json ~/.garden_grow.json ~/.garden_schedule.json
+rm ~/.garden_state.json ~/.garden_grow.json ~/.garden_schedule.json ~/.garden_presets.json
 ```
 
-(Paths are configurable via `STATE_FILE`, `GROW_STATE_FILE`, `SCHEDULE_FILE`.)
+(Paths are configurable via `STATE_FILE`, `GROW_STATE_FILE`, `SCHEDULE_FILE`, `PRESETS_FILE`.
+Deleting the presets file only drops your custom presets; the built-in stage presets live in code.)

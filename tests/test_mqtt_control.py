@@ -38,6 +38,7 @@ class MqttControlTestCase(unittest.TestCase):
         self.tmp = tempfile.mkdtemp()
         self.config.SCHEDULE_FILE = os.path.join(self.tmp, "sched.json")
         self.config.GROW_STATE_FILE = os.path.join(self.tmp, "grow.json")
+        self.config.PRESETS_FILE = os.path.join(self.tmp, "presets.json")
         # Never touch the host crontab.
         self.mqtt.sched_lib._read_crontab = lambda: []
         self.mqtt.sched_lib._write_crontab = lambda lines: None
@@ -120,6 +121,42 @@ class MqttControlTestCase(unittest.TestCase):
         mon = self.mqtt.sched_lib.load_schedule()["lights"]["days"]["mon"][0]
         self.assertEqual(mon["onTime"], "23:00")
         self.assertEqual(mon["brightness"], 60)
+
+    # --- presets (HA select) ---
+    def test_preset_select_loads_builtin_week(self):
+        self.send("schedule/preset/set", "night")
+        sched = self.mqtt.sched_lib.load_schedule()
+        self.assertTrue(sched["lights"]["enabled"] and sched["pump"]["enabled"])
+        for day in self.mqtt.sched_lib.DAYS:
+            self.assertEqual(sched["lights"]["days"][day][0]["onTime"], "23:00")
+            self.assertEqual(len(sched["pump"]["days"][day]), 3)
+        self.assertIn("night", self.published_for("schedule/preset"))
+
+    def test_preset_select_loads_custom_and_reports_custom_after_edit(self):
+        self.mqtt.presets_lib.save_preset(
+            {
+                "name": "herbs",
+                "lights": {
+                    "days": {"mon": [{"onTime": "05:00", "offTime": "19:00", "brightness": 40}]}
+                },
+                "pump": {"days": {"mon": [{"time": "06:00", "duration": 2}]}},
+            }
+        )
+        self.send("schedule/preset/set", "herbs")
+        sched = self.mqtt.sched_lib.load_schedule()
+        self.assertEqual(sched["lights"]["days"]["mon"][0]["brightness"], 40)
+        self.assertEqual(sched["lights"]["days"]["tue"], [])  # only monday was set
+        self.assertIn("herbs", self.published_for("schedule/preset"))
+        # An everyday edit from HA rewrites all 7 days, so no preset matches now.
+        self.send("schedule/lights/brightness/set", "41")
+        self.assertEqual(self.published_for("schedule/preset")[-1], "custom")
+
+    def test_preset_select_ignores_custom_and_unknown(self):
+        self.send("schedule/preset/set", "night")
+        before = self.mqtt.sched_lib.load_schedule()
+        self.send("schedule/preset/set", "custom")
+        self.send("schedule/preset/set", "does-not-exist")
+        self.assertEqual(self.mqtt.sched_lib.load_schedule(), before)
 
     # --- grow cycle ---
     def test_grow_stage_set(self):
