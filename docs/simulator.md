@@ -22,8 +22,8 @@ python -m venv .venv-dev
   low-water threshold so you can watch the alert toggle.
 - Light/pump remember their state, so brightness/speed sliders read back.
 - Camera endpoints return a placeholder JPEG (no `fswebcam` needed).
-- **Schedules are sandboxed**: saved to a local file under `simulator/.sim/` but
-  the host crontab is never touched.
+- **Schedules and presets are sandboxed**: saved to local files under
+  `simulator/.sim/` but the host crontab is never touched.
 
 Hit the REST surface directly too:
 

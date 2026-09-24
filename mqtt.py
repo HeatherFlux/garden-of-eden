@@ -15,6 +15,7 @@ import paho.mqtt.client as mqtt
 from gpiozero import Button  # Import gpiozero Button
 
 from app.lib import grow as grow_lib
+from app.lib import presets as presets_lib
 from app.lib import state as state_lib
 from app.lib.hardware import detect_model, get_pin_factory
 from app.lib.logging_config import configure_logging
@@ -695,6 +696,22 @@ def send_discovery_messages(client):
         payload.update(extra)
         pub(f"homeassistant/{component}/gardyn/{IDENTIFIER}_{obj}/config", payload)
 
+    # --- Schedule preset select: the built-in stage presets plus any custom
+    # presets saved from the web UI / REST. Options are read at discovery time,
+    # so a preset added later shows up after the next reconnect/restart. ---
+    pub(
+        f"homeassistant/select/gardyn/{IDENTIFIER}_sched_preset/config",
+        {
+            "name": "Schedule Preset",
+            "unique_id": IDENTIFIER + "_sched_preset",
+            "state_topic": BASE_TOPIC + "/schedule/preset",
+            "command_topic": BASE_TOPIC + "/schedule/preset/set",
+            "options": [p["name"] for p in presets_lib.load_presets()] + [presets_lib.CUSTOM],
+            "icon": "mdi:calendar-star",
+            "device": device_info,
+        },
+    )
+
 
 def publish_grow_state(client):
     """Publish current grow stage + day (retained) so HA reflects real state."""
@@ -773,6 +790,8 @@ def publish_schedule_state(client):
         client.publish(
             BASE_TOPIC + "/schedule/pump/duration", str(int(pump.get("duration", 5))), retain=True
         )
+        active = presets_lib.active_preset(schedule)
+        client.publish(BASE_TOPIC + "/schedule/preset", active or presets_lib.CUSTOM, retain=True)
     except Exception:
         logger.exception("Error publishing schedule state")
 
@@ -812,6 +831,17 @@ def _set_everyday_pump(client, **changes):
     for day in sched_lib.DAYS:
         schedule["pump"]["days"][day] = [dict(run)]
     _apply_schedule(client, schedule)
+
+
+def _apply_preset(client, name):
+    """Load a named preset (built-in or custom) into the live schedule."""
+    if name.strip().lower() == presets_lib.CUSTOM:
+        return  # "custom" just labels a hand-edited week; nothing to load
+    preset = presets_lib.get_preset(name)
+    if preset is None:
+        logger.warning("Ignoring unknown schedule preset %r", name)
+        return
+    _apply_schedule(client, presets_lib.preset_schedule(preset))
 
 
 def on_connect(client, userdata, flags, rc, properties=None):
@@ -958,6 +988,10 @@ def on_message(client, userdata, msg):
             _set_everyday_pump(
                 client, duration=max(1, min(MAX_PUMP_RUN_SECONDS // 60, int(payload)))
             )
+
+        # === Schedule presets (built-in stage presets + custom ones) ===
+        elif topic_suffix == "schedule/preset/set":
+            _apply_preset(client, payload)
 
     except ValueError as e:
         logger.warning(f"Rejected message on topic {msg.topic}: {e}")
