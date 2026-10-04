@@ -1,6 +1,6 @@
 import logging
 
-from flask import Blueprint, jsonify
+from flask import Blueprint, jsonify, request
 
 import config
 from app.lib.hardware import get_pin_factory
@@ -26,7 +26,12 @@ check_sensor = check_sensor_guard(sensor=distance_control, sensor_name="Distance
 @distance_blueprint.route("/measure", methods=["GET"])
 @check_sensor
 def get_distance():
-    distance_value = distance_control.measure_once()
+    # ?avg=1 takes the median of several pings: slower, but steady enough to
+    # calibrate tank geometry (e.g. cm per quart added) from the web UI.
+    if request.args.get("avg") in ("1", "true", "yes"):
+        distance_value = distance_control.measure()
+    else:
+        distance_value = distance_control.measure_once()
     gallons = gallons_remaining(
         distance_value,
         config.WATER_FULL_CM,
