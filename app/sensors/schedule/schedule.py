@@ -47,6 +47,9 @@ VACATION_PROFILE = {
     "pump": [{"time": "12:00", "duration": 3}],
 }
 
+# Longest sunrise/sunset fade a light window may ask for (minutes).
+MAX_RAMP_MINUTES = 120
+
 # Weekday order and the cron day-of-week number each maps to (cron: Sun=0).
 DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 DAY_TO_CRON = {"mon": 1, "tue": 2, "wed": 3, "thu": 4, "fri": 5, "sat": 6, "sun": 0}
@@ -60,6 +63,18 @@ DEFAULT_SCHEDULE = {
 
 def _empty_days():
     return {d: [] for d in DAYS}
+
+
+def _clamp_light(entry):
+    """Clamp brightness to 0-100 and rampMinutes to 0-120 when they're numeric.
+    Non-numeric values are left alone so the compiler rejects them."""
+    entry = dict(entry)
+    for key, hi in (("brightness", 100), ("rampMinutes", MAX_RAMP_MINUTES)):
+        try:
+            entry[key] = max(0, min(hi, int(entry[key])))
+        except (KeyError, TypeError, ValueError):
+            pass
+    return entry
 
 
 def normalize_schedule(schedule):
@@ -78,7 +93,7 @@ def normalize_schedule(schedule):
     if isinstance(lights.get("days"), dict):
         for day, entries in lights["days"].items():
             if day in light_days and isinstance(entries, list):
-                light_days[day] = [dict(e) for e in entries]
+                light_days[day] = [_clamp_light(e) for e in entries]
     elif lights.get("onTime") or lights.get("offTime"):
         # Legacy: one window applied to every day.
         window = {
@@ -188,6 +203,7 @@ def build_cron_lines(schedule):
 
     lights = schedule["lights"]
     if lights["enabled"]:
+        ons, offs = [], []
         for day in DAYS:
             dow = DAY_TO_CRON[day]
             for window in lights["days"][day]:
@@ -195,6 +211,9 @@ def build_cron_lines(schedule):
                 ramp = int(window.get("rampMinutes", 0) or 0)
                 on_m, on_h = _hh_mm(window.get("onTime", "08:00"))
                 off_m, off_h = _hh_mm(window.get("offTime", "22:00"))
+                # A window whose off time is at or before its on time runs past
+                # midnight, so it turns off on the following weekday.
+                off_dow = dow if (off_h, off_m) > (on_h, on_m) else (dow + 1) % 7
                 # light.sh takes positional args: `light <brightness|off>`, or
                 # `light ramp <brightness> <minutes>` for a sunrise/sunset fade.
                 if ramp > 0:
@@ -203,8 +222,17 @@ def build_cron_lines(schedule):
                 else:
                     on_cmd = f"{LIGHT_CMD} {brightness}"
                     off_cmd = f"{LIGHT_CMD} off"
-                lines.append(f"{on_m} {on_h} * * {dow} {on_cmd} {CRON_MARKER}")
-                lines.append(f"{off_m} {off_h} * * {dow} {off_cmd} {CRON_MARKER}")
+                ons.append((on_m, on_h, dow, on_cmd))
+                offs.append((off_m, off_h, off_dow, off_cmd))
+        # Back-to-back windows (one ends as the next begins) would race an `off`
+        # against an `on` in the same minute; drop the off and let the new level
+        # take over (a ramp fades from the current level, so it stays smooth).
+        starts = {(m, h, dow) for m, h, dow, _ in ons}
+        for m, h, dow, cmd in ons:
+            lines.append(f"{m} {h} * * {dow} {cmd} {CRON_MARKER}")
+        for m, h, dow, cmd in offs:
+            if (m, h, dow) not in starts:
+                lines.append(f"{m} {h} * * {dow} {cmd} {CRON_MARKER}")
 
     pump = schedule["pump"]
     if pump["enabled"]:

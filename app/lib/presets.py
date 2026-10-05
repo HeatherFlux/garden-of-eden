@@ -28,52 +28,69 @@ from app.sensors.schedule import schedule as sched
 MAX_NAME = 40
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _-]*$")
 
-# One light window + pump runs, expanded to all seven days on load. Same values
-# the web UI shipped as hardcoded chips before presets moved server side.
-BUILTIN_PRESETS = {
+# One light window + pump runs, expanded to all seven days on load. Values
+# follow Gardyn's guidance: 14-16h a day at full ("Boost") brightness for every
+# stage, since dimmed hours don't count toward the photoperiod and 17h+ stresses
+# plants; fruiting/flowering sits at the 14h low end. Each run stays under the
+# 15-minute pump cap, with at least one run in the dark period.
+_DAY_PRESETS = {
     "germinate": {
-        "light": {"onTime": "06:00", "offTime": "22:00", "brightness": 30, "rampMinutes": 15},
+        "light": {"onTime": "06:00", "offTime": "22:00", "brightness": 100, "rampMinutes": 20},
         "pump": [
             {"time": "06:00", "duration": 3},
-            {"time": "12:00", "duration": 3},
-            {"time": "18:00", "duration": 3},
+            {"time": "14:00", "duration": 3},
+            {"time": "22:00", "duration": 3},
         ],
     },
     "seedling": {
-        "light": {"onTime": "06:00", "offTime": "22:00", "brightness": 50, "rampMinutes": 15},
+        "light": {"onTime": "06:00", "offTime": "22:00", "brightness": 100, "rampMinutes": 20},
         "pump": [
-            {"time": "08:00", "duration": 4},
-            {"time": "16:00", "duration": 4},
-            {"time": "00:00", "duration": 4},
+            {"time": "06:00", "duration": 4},
+            {"time": "14:00", "duration": 4},
+            {"time": "22:00", "duration": 4},
         ],
     },
     "vegetative": {
-        "light": {"onTime": "06:00", "offTime": "22:00", "brightness": 80, "rampMinutes": 20},
+        "light": {"onTime": "06:00", "offTime": "22:00", "brightness": 100, "rampMinutes": 20},
         "pump": [
-            {"time": "08:00", "duration": 5},
-            {"time": "16:00", "duration": 5},
-            {"time": "00:00", "duration": 5},
+            {"time": "06:00", "duration": 5},
+            {"time": "14:00", "duration": 5},
+            {"time": "22:00", "duration": 5},
         ],
     },
     "flower": {
-        "light": {"onTime": "07:00", "offTime": "19:00", "brightness": 100, "rampMinutes": 20},
+        "light": {"onTime": "07:00", "offTime": "21:00", "brightness": 100, "rampMinutes": 20},
         "pump": [
-            {"time": "08:00", "duration": 5},
+            {"time": "07:00", "duration": 5},
             {"time": "14:00", "duration": 5},
-            {"time": "20:00", "duration": 5},
-        ],
-    },
-    # Run the garden overnight: lights 11pm-7am (daytime sun does the rest) and
-    # watering while you sleep. The window crosses midnight on purpose.
-    "night": {
-        "light": {"onTime": "23:00", "offTime": "07:00", "brightness": 80, "rampMinutes": 20},
-        "pump": [
-            {"time": "23:15", "duration": 5},
-            {"time": "02:00", "duration": 5},
-            {"time": "05:00", "duration": 5},
+            {"time": "21:00", "duration": 5},
         ],
     },
 }
+
+# Night mode shifts a stage's whole day by this many hours, so the lights run
+# overnight and the dark period lands midday (06:00-22:00 -> 20:00-12:00).
+# Gardyn only recommends this when the room stays dark during the day.
+NIGHT_SHIFT_HOURS = 14
+NIGHT_SUFFIX = "-night"
+
+
+def _shift(hh_mm, hours):
+    h, m = (int(x) for x in hh_mm.split(":"))
+    return f"{(h + hours) % 24:02d}:{m:02d}"
+
+
+def _night(spec, hours=NIGHT_SHIFT_HOURS):
+    light = dict(spec["light"])
+    light["onTime"] = _shift(light["onTime"], hours)
+    light["offTime"] = _shift(light["offTime"], hours)
+    pump = [dict(r, time=_shift(r["time"], hours)) for r in spec["pump"]]
+    pump.sort(key=lambda r: r["time"])
+    return {"light": light, "pump": pump}
+
+
+BUILTIN_PRESETS = dict(_DAY_PRESETS)
+BUILTIN_PRESETS.update({name + NIGHT_SUFFIX: _night(spec) for name, spec in _DAY_PRESETS.items()})
 
 # Name Home Assistant's preset select shows when the live schedule matches no
 # preset (hand-edited week). Selecting it is a no-op.

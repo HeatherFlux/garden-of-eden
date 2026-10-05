@@ -154,14 +154,24 @@
     .mode-group .mode { border-radius:999px 0 0 999px; }
     .mode-group .mode.del { border-radius:0 999px 999px 0; border-left:0; padding:8px 10px; color:var(--muted); }
     .mode-group .mode.del:hover { color:#c0392b; border-color:#c0392b; }
-    /* Week heatmap scheduler */
-    .heatmap { display:grid; grid-template-columns:30px repeat(24,1fr); gap:2px; align-items:center; }
+    /* Week paint grid: drag across cells to paint light at the brush level */
+    .heatmap { display:grid; grid-template-columns:30px repeat(24,1fr) 34px; gap:2px; align-items:center;
+      touch-action:none; user-select:none; -webkit-user-select:none; }
     .heatmap .hlabel { font-size:.6rem; color:var(--faint); text-align:right; padding-right:4px; }
     .heatmap .hhour { font-size:.52rem; color:var(--faint); text-align:center; }
-    .heatmap .cell { height:15px; border-radius:3px; background:var(--surface-2); position:relative; }
+    .heatmap .hlabel.pick, .heatmap .hhour.pick { cursor:pointer; }
+    .heatmap .hlabel.pick:hover, .heatmap .hhour.pick:hover { color:var(--green); }
+    .heatmap .cell { height:18px; border-radius:3px; background:var(--surface-2); position:relative; cursor:crosshair; }
+    .heatmap .htot { font-size:.62rem; font-weight:700; text-align:right; color:var(--muted); font-variant-numeric:tabular-nums; }
+    .heatmap .htot.warn { color:#c98a0b; } .heatmap .htot.bad { color:#c0392b; }
+    .brushes { display:flex; flex-wrap:wrap; align-items:center; gap:6px; margin-bottom:10px; font-size:.78rem; }
+    .brushes .mode { padding:5px 11px; font-size:.75rem; display:inline-flex; align-items:center; gap:6px; }
+    .brushes .sw { width:10px; height:10px; border-radius:3px; border:1px solid var(--line); }
+    .brushes input[type=number] { width:56px; }
+    .night-note { font-size:.74rem; color:var(--muted); margin:-6px 0 12px; }
     .heatmap .cell.pump::after { content:""; position:absolute; inset:0; margin:auto; width:4px; height:4px;
       border-radius:50%; background:#4a9be0; }
-    .hm-legend { display:flex; gap:16px; margin-top:10px; font-size:.7rem; color:var(--muted); align-items:center; }
+    .hm-legend { display:flex; flex-wrap:wrap; gap:6px 16px; margin-top:10px; font-size:.7rem; color:var(--muted); align-items:center; }
     .hm-legend .sw { display:inline-block; width:11px; height:11px; border-radius:3px; vertical-align:-1px; margin-right:5px; }
     .hm-legend .sw.light { background:var(--green); } .hm-legend .sw.pump { background:#4a9be0; }
     details.customize { margin-top:14px; }
@@ -373,19 +383,26 @@
     <div class="card">
       <h2>Schedule</h2>
       <div class="modes" id="presets"></div>
+      <div class="row" style="margin:-4px 0 12px">
+        <label class="switch"><input type="checkbox" id="night-mode" onchange="toggleNightMode()"><span class="track"></span>Night mode</label>
+        <span class="muted">stage presets run the lights overnight and go dark midday</span>
+      </div>
+      <div class="night-note" id="night-note" hidden>Gardyn recommends night lighting only if the room stays dark during the day. Daylight on the plants cuts into the dark period they need.</div>
 
+      <div class="brushes" id="brushes"></div>
       <div class="heatmap" id="heatmap"></div>
       <div class="hm-legend">
         <span><i class="sw light"></i>light %</span>
         <span><i class="sw pump"></i>pump run</span>
-        <span class="muted" style="margin-left:auto">tap a preset, then Save · edit the week below and save it as your own</span>
+        <span title="Gardyn: 14-16 hours a day at full brightness; dimmed hours don't count, 17h or more stresses plants">h = full-brightness hours</span>
+        <span class="muted" style="margin-left:auto">drag to paint · tap a day or hour to fill it</span>
       </div>
 
       <details class="customize">
         <summary>Customize per day</summary>
         <div class="row" style="margin-top:12px">
           <label class="switch"><input type="checkbox" id="sch-lights-en"><span class="track"></span>Lights</label>
-          <button class="ghost" onclick="copyDay('light')">Copy Mon → all</button>
+          <span class="muted">exact times for when an hour grid isn't precise enough</span>
         </div>
         <div class="sched-days" id="sch-light-days"></div>
         <div class="row" style="margin-top:16px">
@@ -408,7 +425,7 @@
       </div>
       <div class="row" style="margin-top:16px">
         <button class="btn" onclick="saveSchedule()">Save schedule</button>
-        <span class="muted" id="sch-status">pump runs are capped at 15 min for safety</span>
+        <span class="muted" id="sch-status">pump runs are capped at <span id="sch-pumpcap">15</span> min for safety</span>
       </div>
     </div>
   </div>
@@ -419,6 +436,7 @@
     let API_KEY = localStorage.getItem("garden_key") || "";
     let camTimer = null;
     let camInterval = +localStorage.getItem("camInterval") || 6000;
+    let pumpMaxMin = 15;    // pump run cap (min) from /system
     let waterLowCm = null;  // tank-low threshold (cm) from /system; null = disabled
     const SCH_DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
     const emptyDays = () => Object.fromEntries(SCH_DAYS.map(d => [d, []]));
@@ -541,6 +559,7 @@
         waterLowCm = (s.water_low_cm != null && s.water_low_cm !== 0) ? s.water_low_cm : null;
         $("d-waterlow").textContent = waterLowCm != null ? `> ${waterLowCm} cm` : "off";
         $("d-pumpcap").textContent = s.pump_max_run_seconds != null ? `${Math.round(s.pump_max_run_seconds / 60)} min` : "—";
+        if (s.pump_max_run_seconds) { pumpMaxMin = Math.max(1, Math.floor(s.pump_max_run_seconds / 60)); $("sch-pumpcap").textContent = pumpMaxMin; renderDays("pump", pumpDays, $("sch-pump-days")); }
         conn(true);
       } catch { $("meta").textContent = "offline"; conn(false); }
     }
@@ -586,51 +605,170 @@
     function setStage(stage) { post("/grow/stage", { stage }); }
     function startGrow() { post("/grow/start").then(loadGrow); }
 
-    // Clamp a pump duration input to the 1..15 minute safety range.
-    function clampPumpMin(input) { let v = Math.round(+input.value || 0); v = Math.min(15, Math.max(1, v)); input.value = v; return v; }
+    // Clamp a pump duration input to the 1..pumpMaxMin minute safety range.
+    function clampPumpMin(input) { let v = Math.round(+input.value || 0); v = Math.min(pumpMaxMin, Math.max(1, v)); input.value = v; return v; }
 
     function renderSchedule() {
       renderDays("light", lightDays, $("sch-light-days"));
       renderDays("pump", pumpDays, $("sch-pump-days"));
-      renderHeatmap();
+      syncGrid();
     }
 
-    // ---- Week heatmap (7 days x 24h): green shade = light %, dot = pump ----
+    // ---- Week paint grid (7 days x 24h). grid[day*24 + hour] = light % (0 = off).
+    // lightDays stays the saved model: painting rebuilds it from the grid, and any
+    // other change to lightDays (preset, exact-time edit) rebuilds the grid. A
+    // window ending at or before it starts runs into the next day, as on the Pi. ----
     const hourOf = t => parseInt((t || "0:0").split(":")[0], 10) || 0;
-    const inWin = (h, on, off) => on === off ? false : (on < off ? (h >= on && h < off) : (h >= on || h < off));
     const hourTick = h => h === 0 ? "12a" : h === 12 ? "12p" : h < 12 ? h + "a" : (h - 12) + "p";
+    const hh = h => String(h).padStart(2, "0") + ":00";
+    const BRUSHES = [0, 25, 50, 75, 100];
+    let grid = new Array(168).fill(0), brush = 100, gridRounded = false, roundNoticeShown = false;
+    let painting = null;  // {value} while a drag is in progress
+
+    function gridFromDays(days) {
+      const g = new Array(168).fill(0); let rounded = false;
+      const nearest = t => { const [h, m] = (t || "0:0").split(":").map(Number); if (m) rounded = true; return Math.round(h + (m || 0) / 60) % 24; };
+      SCH_DAYS.forEach((day, di) => (days[day] || []).forEach(w => {
+        const on = nearest(w.onTime), off = nearest(w.offTime), b = Math.max(0, Math.min(100, +w.brightness || 0));
+        let len = (off - on + 24) % 24;
+        if (len === 0 && w.onTime === w.offTime) len = 24;  // same on/off time = on all day
+        for (let k = 0; k < len; k++) { const i = (di * 24 + on + k) % 168; g[i] = Math.max(g[i], b); }
+      }));
+      gridRounded = rounded; return g;
+    }
+    function daysFromGrid(g, ramp) {
+      const days = emptyDays();
+      const push = (start, len, b) => {  // a window may cross one midnight, so split runs over 24h
+        for (let off = 0; off < len; off += 24) {
+          const i = (start + off) % 168, n = Math.min(24, len - off);
+          days[SCH_DAYS[Math.floor(i / 24)]].push({ onTime: hh(i % 24), offTime: hh((i + n) % 24), brightness: b, rampMinutes: ramp });
+        }
+      };
+      let s0 = g.findIndex((v, i) => v !== g[(i + 167) % 168]);
+      if (s0 < 0) { if (g[0] > 0) push(0, 168, g[0]); return days; }  // whole week one level
+      for (let k = 0; k < 168;) {
+        const i = (s0 + k) % 168, v = g[i]; let n = 1;
+        while (k + n < 168 && g[(s0 + k + n) % 168] === v) n++;
+        if (v > 0) push(i, n, v);
+        k += n;
+      }
+      SCH_DAYS.forEach(d => days[d].sort((x, y) => x.onTime.localeCompare(y.onTime)));
+      return days;
+    }
+    const rampSetting = () => Math.max(0, Math.min(120, Math.round(+($("brush-ramp") || {}).value || 0)));
+    function syncGrid() { grid = gridFromDays(lightDays); renderHeatmap(); }
+    function commitGrid() {
+      lightDays = daysFromGrid(grid, rampSetting());
+      if (grid.some(v => v > 0)) $("sch-lights-en").checked = true;
+      renderDays("light", lightDays, $("sch-light-days")); renderHeatmap();
+      $("sch-status").textContent = "unsaved changes — Save schedule to apply";
+      if (gridRounded && !roundNoticeShown) { roundNoticeShown = true; toast("times not on the hour were rounded to the nearest hour"); }
+      gridRounded = false;
+    }
+
+    function renderBrushes() {
+      const box = $("brushes"); if (!box) return; box.innerHTML = "";
+      const lab = document.createElement("span"); lab.className = "muted"; lab.textContent = "Brush"; box.appendChild(lab);
+      BRUSHES.forEach(b => {
+        const btn = document.createElement("button"); btn.className = "mode" + (b === brush ? " active" : "");
+        const sw = document.createElement("i"); sw.className = "sw"; sw.style.background = b ? cellColor(b) : "var(--surface-2)";
+        btn.append(sw, document.createTextNode(b ? b + "%" : "Off"));
+        btn.onclick = () => { brush = b; renderBrushes(); }; box.appendChild(btn);
+      });
+      const custom = document.createElement("input"); custom.type = "number"; custom.min = 1; custom.max = 100; custom.id = "brush-custom";
+      custom.placeholder = "%"; custom.title = "custom brush brightness"; if (!BRUSHES.includes(brush)) custom.value = brush;
+      custom.onchange = () => { const v = Math.max(1, Math.min(100, Math.round(+custom.value || 0))); custom.value = v; brush = v; renderBrushes(); };
+      const rampLab = document.createElement("label"); rampLab.className = "muted"; rampLab.style.marginLeft = "8px";
+      rampLab.innerHTML = `fade <input type="number" id="brush-ramp" min="0" max="120" value="${rampSetting.cache ?? 20}"> min`;
+      rampLab.querySelector("input").onchange = e => { rampSetting.cache = rampSetting(); e.target.value = rampSetting.cache; commitGrid(); };
+      const tools = document.createElement("span"); tools.style.marginLeft = "auto"; tools.style.display = "inline-flex"; tools.style.gap = "6px";
+      const tool = (label, fn) => { const t = document.createElement("button"); t.className = "ghost"; t.textContent = label; t.onclick = fn; return t; };
+      tools.append(tool("Copy Mon → all", () => copyGridRow([1, 2, 3, 4, 5, 6])), tool("Mon → weekdays", () => copyGridRow([1, 2, 3, 4])), tool("Clear", () => { grid.fill(0); commitGrid(); }));
+      box.append(custom, rampLab, tools);
+    }
+    function copyGridRow(targets) {
+      const mon = grid.slice(0, 24);
+      targets.forEach(d => mon.forEach((v, h) => { grid[d * 24 + h] = v; }));
+      commitGrid();
+    }
+    const cellColor = b => `rgba(63,155,110,${0.18 + 0.82 * b / 100})`;
+    function paintCell(el, i, v) { grid[i] = v; el.style.background = v > 0 ? cellColor(v) : ""; }
+    // Fill a whole row/column: if it's already all at the brush, clear it instead.
+    function fillCells(idx) {
+      const v = idx.every(i => grid[i] === brush) ? 0 : brush;
+      idx.forEach(i => { grid[i] = v; }); commitGrid();
+    }
+
     function renderHeatmap() {
       const box = $("heatmap"); if (!box) return; box.innerHTML = "";
       const cell = (cls, txt) => { const d = document.createElement("div"); d.className = cls; if (txt) d.textContent = txt; return d; };
       box.appendChild(cell("hlabel", ""));
-      for (let h = 0; h < 24; h++) box.appendChild(cell("hhour", h % 6 === 0 ? hourTick(h) : ""));
-      SCH_DAYS.forEach(day => {
-        box.appendChild(cell("hlabel", day[0].toUpperCase() + day.slice(1, 3)));
-        const lit = new Array(24).fill(0);
-        (lightDays[day] || []).forEach(w => {
-          const on = hourOf(w.onTime), off = hourOf(w.offTime), b = +w.brightness || 0;
-          for (let h = 0; h < 24; h++) if (inWin(h, on, off)) lit[h] = Math.max(lit[h], b);
-        });
+      for (let h = 0; h < 24; h++) {
+        const c = cell("hhour pick", h % 6 === 0 ? hourTick(h) : ""); c.title = `fill ${hourTick(h)} on every day`;
+        c.onclick = () => fillCells(SCH_DAYS.map((_, d) => d * 24 + h)); box.appendChild(c);
+      }
+      box.appendChild(cell("hhour", "h"));
+      SCH_DAYS.forEach((day, di) => {
+        const lab = cell("hlabel pick", day[0].toUpperCase() + day.slice(1, 3)); lab.title = `fill all of ${day}`;
+        lab.onclick = () => fillCells([...Array(24).keys()].map(h => di * 24 + h)); box.appendChild(lab);
         const pumps = new Set((pumpDays[day] || []).map(r => hourOf(r.time)));
         for (let h = 0; h < 24; h++) {
-          const c = cell("cell" + (pumps.has(h) ? " pump" : ""), "");
-          if (lit[h] > 0) c.style.background = `rgba(63,155,110,${0.18 + 0.82 * lit[h] / 100})`;
-          c.title = `${day} ${h}:00${lit[h] ? ` · ${lit[h]}% light` : ""}${pumps.has(h) ? " · pump" : ""}`;
+          const i = di * 24 + h, v = grid[i];
+          const c = cell("cell" + (pumps.has(h) ? " pump" : ""), ""); c.dataset.i = i;
+          if (v > 0) c.style.background = cellColor(v);
+          c.title = `${day} ${hourTick(h)}${v ? ` · ${v}% light` : ""}${pumps.has(h) ? " · pump" : ""}`;
           box.appendChild(c);
         }
+        const row = grid.slice(di * 24, di * 24 + 24), full = row.filter(v => v === 100).length, dim = row.filter(v => v > 0 && v < 100).length;
+        const tot = cell("htot" + (full >= 17 ? " bad" : full && (full < 14 || full > 16) ? " warn" : ""), full + "h");
+        tot.title = `${full}h at full brightness${dim ? `, ${dim}h dimmed (Gardyn doesn't count dimmed hours)` : ""}. Gardyn recommends 14–16h; 17h or more stresses plants.`;
+        box.appendChild(tot);
       });
     }
+    // Drag painting (mouse + touch). The first cell decides the stroke: tapping a
+    // cell already at the brush level erases instead.
+    (() => {
+      const box = $("heatmap"); if (!box) return;
+      const at = e => { const el = document.elementFromPoint(e.clientX, e.clientY); return el && el.classList.contains("cell") && box.contains(el) ? el : null; };
+      box.addEventListener("pointerdown", e => {
+        const el = at(e); if (!el) return;
+        e.preventDefault(); box.setPointerCapture(e.pointerId);
+        const i = +el.dataset.i; painting = { value: grid[i] === brush ? 0 : brush, last: i };
+        paintCell(el, i, painting.value);
+      });
+      // Pointer events skip cells on a fast drag, so fill every cell on the line
+      // from the last painted cell to this one.
+      box.addEventListener("pointermove", e => {
+        if (!painting) return; const el = at(e); if (!el) return;
+        const i = +el.dataset.i, d0 = Math.floor(painting.last / 24), h0 = painting.last % 24;
+        const d1 = Math.floor(i / 24), h1 = i % 24, steps = Math.max(Math.abs(d1 - d0), Math.abs(h1 - h0));
+        for (let k = 1; k <= steps; k++) {
+          const j = Math.round(d0 + (d1 - d0) * k / steps) * 24 + Math.round(h0 + (h1 - h0) * k / steps);
+          paintCell(box.querySelector(`.cell[data-i="${j}"]`), j, painting.value);
+        }
+        painting.last = i;
+      });
+      const end = () => { if (painting) { painting = null; commitGrid(); } };
+      box.addEventListener("pointerup", end); box.addEventListener("pointercancel", end);
+    })();
 
     // ---- Presets: built-in stage presets + custom ones, served by /schedule/presets.
     // Tapping one fills the editor (user reviews & Saves); the highlighted chip is
     // whichever preset the saved schedule currently matches. ----
     let presetList = [], activePreset = null;
-    const PRESET_LABELS = { night: "Night (while you sleep)" };
-    const presetLabel = p => p.builtin ? (PRESET_LABELS[p.name] || p.name[0].toUpperCase() + p.name.slice(1)) : p.name;
+    // Built-in stages each have a "<stage>-night" twin; the Night mode switch picks
+    // which one a stage chip loads, so only the day names get their own chip.
+    const NIGHT = "-night";
+    let nightMode = false;
+    const presetLabel = p => p.builtin ? p.name.replace(NIGHT, "").replace(/^./, c => c.toUpperCase()) + (p.name.endsWith(NIGHT) ? " (night)" : "") : p.name;
+    function toggleNightMode() { nightMode = $("night-mode").checked; $("night-note").hidden = !nightMode; renderPresets(); }
     async function loadPresets() {
       try {
         const r = await get("/schedule/presets");
         presetList = r.presets || []; activePreset = r.active || null;
+        if (activePreset && activePreset.endsWith(NIGHT) && presetList.some(p => p.builtin && p.name === activePreset)) {
+          nightMode = true; $("night-mode").checked = true; $("night-note").hidden = false;
+        }
       } catch { presetList = []; activePreset = null; }
       renderPresets();
     }
@@ -641,8 +779,10 @@
         b.textContent = label; b.onclick = onclick; return b;
       };
       presetList.forEach(p => {
-        const active = activePreset && p.name.toLowerCase() === activePreset.toLowerCase();
-        const main = chip(presetLabel(p), () => applyPreset(p.name), active ? "active" : "");
+        if (p.builtin && p.name.endsWith(NIGHT)) return;  // reached via the Night mode switch
+        const target = p.builtin && nightMode && presetList.some(x => x.name === p.name + NIGHT) ? p.name + NIGHT : p.name;
+        const active = activePreset && target.toLowerCase() === activePreset.toLowerCase();
+        const main = chip(presetLabel(p), () => applyPreset(target), active ? "active" : "");
         main.title = p.builtin ? "built-in preset" : "custom preset";
         if (p.builtin) { box.appendChild(main); return; }
         const group = document.createElement("span"); group.className = "mode-group";
@@ -664,7 +804,8 @@
       const p = presetList.find(x => x.name.toLowerCase() === name.toLowerCase()); if (!p) return;
       lightDays = mergeDays(p.lights.days); pumpDays = mergeDays(p.pump.days);
       $("sch-lights-en").checked = true; $("sch-pump-en").checked = true;
-      if (name === "germinate") post("/grow/start").then(loadGrow);
+      if (name.startsWith("germinate") && p.builtin) post("/grow/start").then(loadGrow);
+      const w = Object.values(p.lights.days).flat()[0]; if (w && w.rampMinutes != null) { rampSetting.cache = w.rampMinutes; renderBrushes(); }
       renderSchedule();
       toast(presetLabel(p) + " preset loaded — review & Save");
     }
@@ -767,14 +908,14 @@
         (model[day] || []).forEach((e, i) => {
           const div = document.createElement("div"); div.className = "entry";
           if (kind === "light") {
-            div.innerHTML = `On <input type="time" value="${e.onTime}" onchange="lightDays['${day}'][${i}].onTime=this.value">
-              Off <input type="time" value="${e.offTime}" onchange="lightDays['${day}'][${i}].offTime=this.value">
-              <input type="number" min="0" max="100" value="${e.brightness}" style="width:58px" onchange="lightDays['${day}'][${i}].brightness=+this.value"><span class="muted">%</span>
-              <input type="number" min="0" max="120" value="${e.rampMinutes || 0}" style="width:48px" title="sunrise/sunset ramp (minutes)" onchange="lightDays['${day}'][${i}].rampMinutes=+this.value"><span class="muted">↗ min</span>
+            div.innerHTML = `On <input type="time" value="${e.onTime}" onchange="lightDays['${day}'][${i}].onTime=this.value;syncGrid()">
+              Off <input type="time" value="${e.offTime}" onchange="lightDays['${day}'][${i}].offTime=this.value;syncGrid()">
+              <input type="number" min="0" max="100" value="${e.brightness}" style="width:58px" onchange="lightDays['${day}'][${i}].brightness=+this.value;syncGrid()"><span class="muted">%</span>
+              <input type="number" min="0" max="120" value="${e.rampMinutes || 0}" style="width:48px" title="sunrise/sunset ramp (minutes)" onchange="lightDays['${day}'][${i}].rampMinutes=+this.value;syncGrid()"><span class="muted">↗ min</span>
               <button class="ghost" onclick="lightDays['${day}'].splice(${i},1);renderSchedule()">✕</button>`;
           } else {
             div.innerHTML = `<input type="time" value="${e.time}" onchange="pumpDays['${day}'][${i}].time=this.value">
-              <input type="number" min="1" max="15" value="${e.duration}" style="width:58px" onchange="pumpDays['${day}'][${i}].duration=clampPumpMin(this)"><span class="muted">min (max 15)</span>
+              <input type="number" min="1" max="${pumpMaxMin}" value="${e.duration}" style="width:58px" onchange="pumpDays['${day}'][${i}].duration=clampPumpMin(this)"><span class="muted">min (max ${pumpMaxMin})</span>
               <button class="ghost" onclick="pumpDays['${day}'].splice(${i},1);renderSchedule()">✕</button>`;
           }
           entries.appendChild(div);
@@ -810,6 +951,7 @@
         $("sch-vacation-until").value = v.until || "";
         lightDays = mergeDays(l.days);
         pumpDays = mergeDays(p.days);
+        const w = Object.values(lightDays).flat()[0]; if (w && w.rampMinutes != null) { rampSetting.cache = +w.rampMinutes; renderBrushes(); }
         renderSchedule(); renderPresets();
       } catch {}
     }
@@ -819,6 +961,7 @@
         pump: { enabled: $("sch-pump-en").checked, days: pumpDays },
         vacation: { enabled: $("sch-vacation-en").checked, until: $("sch-vacation-until").value || null },
       });
+      $("sch-status").innerHTML = `pump runs are capped at <span id="sch-pumpcap">${pumpMaxMin}</span> min for safety`;
       loadPresets();
     }
 
@@ -858,6 +1001,7 @@
     $("theme-btn").textContent = document.documentElement.dataset.theme === "dark" ? "🌙" : "☀️";
     $("set-theme").value = localStorage.getItem("theme") || "dark";
     $("set-caminterval").value = camInterval;
+    renderBrushes();
     loadSystem(); refresh(); renderWaterLog(); loadGrow(); loadSchedule(); loadPresets(); loadPods(); loadCams(); loadTimelapses(); syncToggles(); ping();
     setInterval(refresh, 30000);
     setInterval(ping, 10000);

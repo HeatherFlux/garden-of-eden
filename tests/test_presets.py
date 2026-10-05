@@ -35,12 +35,68 @@ class PresetsTestCase(unittest.TestCase):
     # --- built-ins ---
     def test_builtins_expand_to_every_day(self):
         names = [p["name"] for p in presets_lib.builtin_presets()]
-        self.assertEqual(names, ["germinate", "seedling", "vegetative", "flower", "night"])
-        night = presets_lib.get_preset("Night")
+        self.assertEqual(
+            names,
+            [
+                "germinate",
+                "seedling",
+                "vegetative",
+                "flower",
+                "germinate-night",
+                "seedling-night",
+                "vegetative-night",
+                "flower-night",
+            ],
+        )
+        night = presets_lib.get_preset("Vegetative-Night")
         self.assertTrue(night["builtin"])
         for day in sched.DAYS:
-            self.assertEqual(night["lights"]["days"][day][0]["onTime"], "23:00")
+            self.assertEqual(night["lights"]["days"][day][0]["onTime"], "20:00")
             self.assertEqual(len(night["pump"]["days"][day]), 3)
+
+    # --- night mode ---
+    @staticmethod
+    def _minutes(hh_mm):
+        h, m = (int(x) for x in hh_mm.split(":"))
+        return h * 60 + m
+
+    def _light_minutes(self, window):
+        on, off = self._minutes(window["onTime"]), self._minutes(window["offTime"])
+        return (off - on) % (24 * 60)
+
+    def _in_dark(self, window, hh_mm):
+        """True when hh_mm falls in [offTime, onTime), wrapping past midnight."""
+        t = self._minutes(hh_mm)
+        off, on = self._minutes(window["offTime"]), self._minutes(window["onTime"])
+        return (t - off) % (24 * 60) < (on - off) % (24 * 60)
+
+    def test_every_stage_has_a_night_variant_with_the_same_light_hours(self):
+        for stage in ("germinate", "seedling", "vegetative", "flower"):
+            day = presets_lib.get_preset(stage)["lights"]["days"]["mon"][0]
+            night = presets_lib.get_preset(stage + "-night")["lights"]["days"]["mon"][0]
+            self.assertEqual(self._light_minutes(night), self._light_minutes(day), stage)
+            self.assertEqual(night["brightness"], day["brightness"], stage)
+
+    def test_night_variants_light_overnight_and_go_dark_midday(self):
+        for stage in ("germinate", "seedling", "vegetative", "flower"):
+            win = presets_lib.get_preset(stage + "-night")["lights"]["days"]["mon"][0]
+            self.assertGreaterEqual(self._minutes(win["onTime"]), 18 * 60, stage)
+            self.assertTrue(9 * 60 <= self._minutes(win["offTime"]) <= 13 * 60, stage)
+            self.assertTrue(self._in_dark(win, "15:00"), stage)
+            self.assertFalse(self._in_dark(win, "02:00"), stage)
+
+    def test_builtins_follow_gardyn_light_and_pump_limits(self):
+        for preset in presets_lib.builtin_presets():
+            win = preset["lights"]["days"]["mon"][0]
+            hours = self._light_minutes(win) / 60
+            self.assertTrue(14 <= hours <= 16, preset["name"])  # Gardyn: 14-16h Boost
+            self.assertEqual(win["brightness"], 100, preset["name"])  # dim hours don't count
+            runs = preset["pump"]["days"]["mon"]
+            self.assertTrue(
+                any(self._in_dark(win, r["time"]) for r in runs), preset["name"]
+            )  # keep pods wet through the dark period
+            for r in runs:
+                self.assertLessEqual(r["duration"] * 60, config.MAX_PUMP_RUN_SECONDS)
 
     def test_builtin_names_cannot_be_saved_or_deleted(self):
         with self.assertRaises(ValueError):
@@ -117,7 +173,7 @@ class PresetsTestCase(unittest.TestCase):
         self.assertTrue(applied["lights"]["enabled"])
         self.assertTrue(applied["pump"]["enabled"])
         self.assertEqual(applied["vacation"], {"enabled": True, "until": "2999-01-01"})
-        self.assertEqual(sched.load_schedule()["lights"]["days"]["wed"][0]["brightness"], 80)
+        self.assertEqual(sched.load_schedule()["lights"]["days"]["wed"][0]["brightness"], 100)
         with self.assertRaises(KeyError):
             presets_lib.apply_preset("nope")
 
