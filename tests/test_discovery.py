@@ -84,7 +84,7 @@ class DiscoveryTestCase(unittest.TestCase):
             json.loads(p) for t, p in client.published if t.endswith("_sched_preset/config")
         )
         self.assertEqual(payload["command_topic"], self.mqtt.BASE_TOPIC + "/schedule/preset/set")
-        for name in ("germinate", "seedling", "vegetative", "flower", "night", "custom"):
+        for name in ("germinate", "flower", "germinate-night", "flower-night", "custom"):
             self.assertIn(name, payload["options"])
 
 

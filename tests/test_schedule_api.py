@@ -32,7 +32,19 @@ class SchedulePresetsApiTestCase(unittest.TestCase):
         resp = self.client.get("/schedule/presets")
         self.assertEqual(resp.status_code, 200)
         names = [p["name"] for p in resp.json["presets"]]
-        self.assertEqual(names[:5], ["germinate", "seedling", "vegetative", "flower", "night"])
+        self.assertEqual(
+            names[:8],
+            [
+                "germinate",
+                "seedling",
+                "vegetative",
+                "flower",
+                "germinate-night",
+                "seedling-night",
+                "vegetative-night",
+                "flower-night",
+            ],
+        )
         self.assertTrue(all(p["builtin"] for p in resp.json["presets"]))
         self.assertIsNone(resp.json["active"])
 
@@ -73,7 +85,7 @@ class SchedulePresetsApiTestCase(unittest.TestCase):
         self.assertIn("built-in", resp.json["error"])
         bad = {"name": "x", "lights": {"days": {"mon": [{"onTime": "24:00", "offTime": "1:00"}]}}}
         self.assertEqual(self.client.post("/schedule/presets", json=bad).status_code, 400)
-        self.assertEqual(self.client.delete("/schedule/presets/night").status_code, 400)
+        self.assertEqual(self.client.delete("/schedule/presets/flower-night").status_code, 400)
 
 
 if __name__ == "__main__":
