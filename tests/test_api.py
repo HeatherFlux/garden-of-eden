@@ -139,6 +139,16 @@ class DistanceBlueprintTestCase(BaseTestCase):
         # plus the derived gallons estimate (55.5cm is past empty -> 0 gallons).
         self.assertEqual(response.get_json(), {"distance": 55.5, "gallons": 0.0})
 
+    @patch("app.sensors.distance.routes.distance_control.measure")
+    def test_get_distance_averaged(self, mock_measure):
+        mock_measure.return_value = 12.5
+
+        response = self.client.get(f"{self.BASE_ROUTE}?avg=1")
+
+        self.assertEqual(response.status_code, 200)
+        mock_measure.assert_called_once()
+        self.assertEqual(response.get_json()["distance"], 12.5)
+
 
 class PCBTempBlueprintTestCase(BaseTestCase):
 

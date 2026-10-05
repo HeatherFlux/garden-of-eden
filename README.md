@@ -62,6 +62,8 @@ See [`docs/design.md`](docs/design.md) for architecture, and
 | GET | `/temperature` `/humidity` `/pcb-temp` | environment sensors |
 | GET | `/camera/upper` `/camera/lower` | capture a still (JPEG) |
 | GET/POST | `/schedule` | lights/pump cron schedule |
+| GET/POST | `/schedule/presets` · DELETE `/schedule/presets/<name>` | built-in + custom schedule presets |
+| POST | `/schedule/presets/<name>/apply` | load a preset into the live schedule |
 | GET | `/grow` · POST `/grow/start` `/grow/stage` `/grow/acknowledge` | grow-cycle |
 | GET | `/system` | identity, version, detected model/profile |
 
