@@ -267,7 +267,11 @@
         <div class="tile"><div class="top">Air Temp</div><div class="val"><span id="s-temp">—</span><small>°C</small></div></div>
         <div class="tile"><div class="top">Humidity</div><div class="val"><span id="s-hum">—</span><small>%</small></div></div>
         <div class="tile"><div class="top">PCB Temp</div><div class="val"><span id="s-pcb">—</span><small>°C</small></div></div>
-        <div class="tile" id="s-water-card"><div class="top">Water <span class="statuschip" id="s-water-status"></span></div><div class="val"><span id="s-water-gal">—</span><small>gal</small></div><div class="muted" style="font-size:.68rem"><span id="s-water">—</span> cm</div><div class="bar"><i id="s-water-bar" style="width:0"></i></div></div>
+        <div class="tile" id="s-water-card"><div class="top">Water <span class="statuschip" id="s-water-status"></span></div><div class="val"><span id="s-water-gal">—</span><small>gal</small></div><div class="muted" style="font-size:.68rem"><span id="s-water">—</span> cm</div><div class="bar"><i id="s-water-bar" style="width:0"></i></div><button class="ghost" id="water-remeasure" onclick="remeasureWater()" style="margin-top:8px;width:100%">Remeasure</button></div>
+      </div>
+      <div id="wlog-wrap" style="display:none;margin-top:12px">
+        <div class="row" style="justify-content:space-between"><span class="muted">Water readings (Δ = change since previous)</span><button class="ghost" onclick="clearWaterLog()">Clear</button></div>
+        <table id="wlog" style="width:100%;font-size:.8rem;border-collapse:collapse"></table>
       </div>
       <div class="tiles" style="margin-top:12px">
         <div class="tile sm"><div class="top">Pump Voltage</div><div class="val"><span id="p-volt">—</span><small>V</small></div></div>
@@ -498,6 +502,33 @@
       } catch { /* optional */ }
       $("updated").textContent = "updated " + new Date().toLocaleTimeString();
     }
+
+    // Calibration helper: averaged re-reads logged with the delta from the last
+    // one, so "add a quart -> remeasure" gives cm-per-quart directly.
+    let waterLog = [];
+    try { waterLog = JSON.parse(localStorage.getItem("waterLog") || "[]"); } catch { waterLog = []; }
+    function saveWaterLog() { try { localStorage.setItem("waterLog", JSON.stringify(waterLog)); } catch {} }
+    function renderWaterLog() {
+      $("wlog-wrap").style.display = waterLog.length ? "" : "none";
+      $("wlog").innerHTML = waterLog.map((e, i) => {
+        const prev = waterLog[i - 1];
+        const d = prev ? (e.cm - prev.cm) : null;
+        const delta = d == null ? "—" : (d > 0 ? "+" : "") + d.toFixed(2) + " cm";
+        return `<tr><td>${i + 1}</td><td>${e.t}</td><td>${e.cm.toFixed(2)} cm</td><td>${delta}</td><td>${e.gal ?? "—"} gal</td></tr>`;
+      }).join("");
+    }
+    async function remeasureWater() {
+      const btn = $("water-remeasure"); btn.disabled = true; btn.textContent = "Measuring…";
+      try {
+        const w = await get("/distance?avg=1");
+        waterLog.push({ t: new Date().toLocaleTimeString(), cm: w.distance, gal: w.gallons });
+        saveWaterLog(); renderWaterLog();
+        $("s-water").textContent = w.distance;
+        $("s-water-gal").textContent = (w.gallons != null) ? w.gallons : "—";
+      } catch { toast("water reading failed", true); }
+      finally { btn.disabled = false; btn.textContent = "Remeasure"; }
+    }
+    function clearWaterLog() { waterLog = []; saveWaterLog(); renderWaterLog(); }
 
     async function loadSystem() {
       try {
@@ -827,7 +858,7 @@
     $("theme-btn").textContent = document.documentElement.dataset.theme === "dark" ? "🌙" : "☀️";
     $("set-theme").value = localStorage.getItem("theme") || "dark";
     $("set-caminterval").value = camInterval;
-    loadSystem(); refresh(); loadGrow(); loadSchedule(); loadPresets(); loadPods(); loadCams(); loadTimelapses(); syncToggles(); ping();
+    loadSystem(); refresh(); renderWaterLog(); loadGrow(); loadSchedule(); loadPresets(); loadPods(); loadCams(); loadTimelapses(); syncToggles(); ping();
     setInterval(refresh, 30000);
     setInterval(ping, 10000);
   </script>
