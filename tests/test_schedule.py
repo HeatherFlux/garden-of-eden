@@ -91,6 +91,62 @@ class BuildCronLinesTestCase(unittest.TestCase):
         with self.assertRaises(ValueError):
             sched.build_cron_lines(s)
 
+    def test_cross_midnight_off_lands_on_next_weekday(self):
+        s = {
+            "lights": {
+                "enabled": True,
+                "days": {"mon": [{"onTime": "20:00", "offTime": "12:00", "brightness": 100}]},
+            }
+        }
+        lines = sched.build_cron_lines(s)
+        self.assertIn("0 20 * * 1 /usr/local/bin/light 100", lines[0])
+        # Monday's 20:00 window ends Tuesday (cron 2) at noon, not Monday noon.
+        self.assertIn("0 12 * * 2 /usr/local/bin/light off", lines[1])
+
+    def test_cross_midnight_sunday_wraps_to_monday(self):
+        s = {
+            "lights": {
+                "enabled": True,
+                "days": {"sun": [{"onTime": "23:00", "offTime": "07:00", "brightness": 80}]},
+            }
+        }
+        lines = sched.build_cron_lines(s)
+        self.assertIn("0 23 * * 0 /usr/local/bin/light 80", lines[0])
+        self.assertIn("0 7 * * 1 /usr/local/bin/light off", lines[1])
+
+    def test_back_to_back_windows_skip_the_boundary_off(self):
+        s = {
+            "lights": {
+                "enabled": True,
+                "days": {
+                    "mon": [
+                        {"onTime": "06:00", "offTime": "10:00", "brightness": 100},
+                        {"onTime": "10:00", "offTime": "22:00", "brightness": 50},
+                    ]
+                },
+            }
+        }
+        lines = sched.build_cron_lines(s)
+        self.assertEqual(len(lines), 3)  # two ons + only the final off
+        self.assertFalse(any(ln.startswith("0 10 ") and " off " in ln for ln in lines))
+        self.assertIn("0 10 * * 1 /usr/local/bin/light 50", "\n".join(lines))
+        self.assertIn("0 22 * * 1 /usr/local/bin/light off", "\n".join(lines))
+
+    def test_window_continuing_past_midnight_skips_the_midnight_off(self):
+        # Mon 18:00-00:00 then Tue 00:00-06:00 is one continuous lit period.
+        s = {
+            "lights": {
+                "enabled": True,
+                "days": {
+                    "mon": [{"onTime": "18:00", "offTime": "00:00", "brightness": 100}],
+                    "tue": [{"onTime": "00:00", "offTime": "06:00", "brightness": 100}],
+                },
+            }
+        }
+        lines = sched.build_cron_lines(s)
+        self.assertFalse(any(ln.startswith("0 0 ") and " off " in ln for ln in lines))
+        self.assertIn("0 6 * * 2 /usr/local/bin/light off", "\n".join(lines))
+
 
 class VacationModeTestCase(unittest.TestCase):
     def test_is_vacation_active_respects_until(self):
@@ -146,3 +202,26 @@ class NormalizeScheduleTestCase(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+    def test_light_brightness_and_ramp_are_clamped(self):
+        s = sched.normalize_schedule(
+            {
+                "lights": {
+                    "days": {
+                        "mon": [
+                            {"onTime": "06:00", "offTime": "22:00", "brightness": 150},
+                            {
+                                "onTime": "06:00",
+                                "offTime": "22:00",
+                                "brightness": -5,
+                                "rampMinutes": 999,
+                            },
+                        ]
+                    }
+                }
+            }
+        )
+        first, second = s["lights"]["days"]["mon"]
+        self.assertEqual(first["brightness"], 100)
+        self.assertEqual(second["brightness"], 0)
+        self.assertEqual(second["rampMinutes"], sched.MAX_RAMP_MINUTES)
